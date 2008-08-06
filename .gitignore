@@ -1,3 +1,5 @@
-sequel_core/spec/spec_config.rb
+spec/spec_config.rb
 rdoc
 pkg
+coverage
+www/public/*.html
