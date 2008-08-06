@@ -139,20 +139,29 @@ module Sequel
       # special case for sqlite
       if uri.scheme == 'sqlite'
         {
-          :user => uri.user,
-          :password => uri.password,
-          :database => (uri.host.nil? && uri.path == '/') ? nil : "#{uri.host}#{uri.path}"
+          :user => unescape(uri.user),
+          :password => unescape(uri.password),
+          :database => (uri.host.nil? && uri.path == '/') ? nil : "#{unescape(uri.host)}#{CGI.unescape(uri.path)}"
         }
       else
         {
-          :user => uri.user,
-          :password => uri.password,
-          :host => uri.host,
+          :user => unescape(uri.user),
+          :password => unescape(uri.password),
+          :host => unescape(uri.host),
           :port => uri.port,
-          :database => (m = /\/(.*)/.match(uri.path)) && (m[1])
+          :database => (m = /\/(.*)/.match(uri.path)) && (unescape(m[1]))
         }
       end
     end
+    
+    def self.unescape(string)
+      if string
+        string.tr('+', ' ').gsub(/((?:%[0-9a-fA-F]{2})+)/n) do
+          [$1.delete('%')].pack('H*')
+        end
+      end
+    end
+    
     
     ### Private Class Methods ###
 

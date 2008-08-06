@@ -636,6 +636,15 @@ context "Database#uri_to_options" do
     h[:port].should == 1234
     h[:database].should == 'blah'
   end
+  
+  specify "should unescape cgi-escaped chars" do
+    h = Sequel::Database.uri_to_options('ttt://uuu:p%40p%40p@192.168.60.1:1234/blah')
+    h[:user].should == 'uuu'
+    h[:password].should == 'p@p@p'
+    h[:host].should == '192.168.60.1'
+    h[:port].should == 1234
+    h[:database].should == 'blah'
+  end
 end
 
 context "A single threaded database" do
