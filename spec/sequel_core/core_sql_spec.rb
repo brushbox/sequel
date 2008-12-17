@@ -30,10 +30,13 @@ context "Array#case and Hash#case" do
 
   specify "should return SQL CASE expression" do
     @d.literal({:x=>:y}.case(:z)).should == '(CASE WHEN x THEN y ELSE z END)'
+    @d.literal({:x=>:y}.case(:z, :exp)).should == '(CASE exp WHEN x THEN y ELSE z END)'
     ['(CASE WHEN x THEN y WHEN a THEN b ELSE z END)',
      '(CASE WHEN a THEN b WHEN x THEN y ELSE z END)'].should(include(@d.literal({:x=>:y, :a=>:b}.case(:z))))
     @d.literal([[:x, :y]].case(:z)).should == '(CASE WHEN x THEN y ELSE z END)'
     @d.literal([[:x, :y], [:a, :b]].case(:z)).should == '(CASE WHEN x THEN y WHEN a THEN b ELSE z END)'
+    @d.literal([[:x, :y], [:a, :b]].case(:z, :exp)).should == '(CASE exp WHEN x THEN y WHEN a THEN b ELSE z END)'
+    @d.literal([[:x, :y], [:a, :b]].case(:z, :exp__w)).should == '(CASE exp.w WHEN x THEN y WHEN a THEN b ELSE z END)'
   end
 
   specify "should raise an error if an array that isn't all two pairs is used" do
@@ -45,6 +48,18 @@ context "Array#case and Hash#case" do
   specify "should raise an error if an empty array/hash is used" do
     proc{[].case(:a)}.should raise_error(Sequel::Error)
     proc{{}.case(:a)}.should raise_error(Sequel::Error)
+  end
+end
+
+context "Array#sql_array" do
+  setup do
+    @d = Sequel::Dataset.new(nil)
+  end
+
+  specify "should treat the array as an SQL array instead of conditions" do
+    @d.literal([[:x, 1], [:y, 2]]).should == '((x = 1) AND (y = 2))'
+    @d.literal([[:x, 1], [:y, 2]].sql_array).should == '((x, 1), (y, 2))'
+    @d.filter([:a, :b]=>[[:x, 1], [:y, 2]].sql_array).sql.should == 'SELECT * WHERE ((a, b) IN ((x, 1), (y, 2)))'
   end
 end
 
@@ -244,12 +259,18 @@ context "Symbol#*" do
     :xyz.*(3).to_s(@ds).should == '(xyz * 3)'
     :abc.*(5).to_s(@ds).should == '(abc * 5)'
   end
+
+  specify "should support qualified symbols if no argument" do
+    :xyz__abc.*.to_s(@ds).should == 'xyz.abc.*'
+  end
+
 end
 
 context "Symbol" do
   before do
     @ds = Sequel::Dataset.new(nil)
     @ds.quote_identifiers = true
+    @ds.upcase_identifiers = true
   end
 
   specify "#identifier should format an identifier" do
@@ -261,11 +282,12 @@ context "Symbol" do
   end
 
   specify "should be able to qualify an identifier" do
-    @ds.literal(:xyz.identifier.qualify(:xyz__abc)).should == '"XYZ__ABC"."XYZ"'
+    @ds.literal(:xyz.identifier.qualify(:xyz__abc)).should == '"XYZ"."ABC"."XYZ"'
   end
 
   specify "should be able to specify a schema.table.column" do
-    @ds.literal(:column.qualify(:table__name.qualify(:schema))).should == '"SCHEMA"."TABLE__NAME"."COLUMN"'
+    @ds.literal(:column.qualify(:table.qualify(:schema))).should == '"SCHEMA"."TABLE"."COLUMN"'
+    @ds.literal(:column.qualify(:table__name.identifier.qualify(:schema))).should == '"SCHEMA"."TABLE__NAME"."COLUMN"'
   end
 end
 
@@ -367,20 +389,46 @@ context "String#to_time" do
 end
 
 context "String#to_date" do
+  after do
+    Sequel.convert_two_digit_years = true
+  end
+
   specify "should convert the string into a Date object" do
     "2007-07-11".to_date.should == Date.parse("2007-07-11")
   end
   
+  specify "should convert 2 digit years by default" do
+    "July 11, 07".to_date.should == Date.parse("2007-07-11")
+  end
+
+  specify "should not convert 2 digit years if set not to" do
+    Sequel.convert_two_digit_years = false
+    "July 11, 07".to_date.should == Date.parse("0007-07-11")
+  end
+
   specify "should raise Error::InvalidValue for an invalid date" do
     proc {'0000-00-00'.to_date}.should raise_error(Sequel::Error::InvalidValue)
   end
 end
 
 context "String#to_datetime" do
+  after do
+    Sequel.convert_two_digit_years = true
+  end
+
   specify "should convert the string into a DateTime object" do
     "2007-07-11 10:11:12a".to_datetime.should == DateTime.parse("2007-07-11 10:11:12a")
   end
   
+  specify "should convert 2 digit years by default" do
+    "July 11, 07 10:11:12a".to_datetime.should == DateTime.parse("2007-07-11 10:11:12a")
+  end
+
+  specify "should not convert 2 digit years if set not to" do
+    Sequel.convert_two_digit_years = false
+    "July 11, 07 10:11:12a".to_datetime.should == DateTime.parse("0007-07-11 10:11:12a")
+  end
+
   specify "should raise Error::InvalidValue for an invalid date" do
     proc {'0000-00-00'.to_datetime}.should raise_error(Sequel::Error::InvalidValue)
   end
@@ -389,6 +437,7 @@ end
 context "String#to_sequel_time" do
   after do
     Sequel.datetime_class = Time
+    Sequel.convert_two_digit_years = true
   end
 
   specify "should convert the string into a Time object by default" do
@@ -402,6 +451,17 @@ context "String#to_sequel_time" do
     "2007-07-11 10:11:12a".to_sequel_time.should == DateTime.parse("2007-07-11 10:11:12a")
   end
   
+  specify "should convert 2 digit years by default if using DateTime class" do
+    Sequel.datetime_class = DateTime
+    "July 11, 07 10:11:12a".to_sequel_time.should == DateTime.parse("2007-07-11 10:11:12a")
+  end
+
+  specify "should not convert 2 digit years if set not to when using DateTime class" do
+    Sequel.datetime_class = DateTime
+    Sequel.convert_two_digit_years = false
+    "July 11, 07 10:11:12a".to_sequel_time.should == DateTime.parse("0007-07-11 10:11:12a")
+  end
+
   specify "should raise Error::InvalidValue for an invalid time" do
     proc {'0000-00-00'.to_sequel_time}.should raise_error(Sequel::Error::InvalidValue)
     Sequel.datetime_class = DateTime

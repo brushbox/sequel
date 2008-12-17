@@ -98,6 +98,15 @@ module Sequel
       def to_s(ds)
         ds.complex_expression_sql(@op, @args)
       end
+
+      # Returns true if the receiver is the same expression as the
+      # the +other+ expression.
+      def eql?( other )
+        return other.is_a?( self.class ) &&
+          @op.eql?( other.op ) &&
+          @args.eql?( other.args )
+      end
+      alias_method :==, :eql?
     end
 
     # The base class for expressions that can be used in multiple places in
@@ -398,6 +407,22 @@ module Sequel
       end
     end
 
+    # Represents an SQL array.  Added so it is possible to deal with a
+    # ruby array of all two pairs as an SQL array instead of an ordered
+    # hash-like conditions specifier.
+    class SQLArray < Expression
+      # Create an object with the given array.
+      def initialize(array)
+        @array = array
+      end
+
+      # Delegate the creation of the resulting SQL to the given dataset,
+      # since it may be database dependent.
+      def to_s(ds)
+        ds.array_sql(@array)
+      end
+    end
+
     # Blob is used to represent binary data in the Ruby environment that is
     # stored as a blob type in the database. In PostgreSQL, the blob type is 
     # called bytea. Sequel represents binary data as a Blob object because 
@@ -438,7 +463,7 @@ module Sequel
           ce = case r
           when Range
             new(:AND, new(:>=, l, r.begin), new(r.exclude_end? ? :< : :<=, l, r.end))
-          when Array, ::Sequel::Dataset
+          when Array, ::Sequel::Dataset, SQLArray
             new(:IN, l, r)
           when NilClass
             new(:IS, l, r)
@@ -481,11 +506,14 @@ module Sequel
       # The default value if no conditions are true
       attr_reader :default
 
+      # The expression to test the conditions against
+      attr_reader :expression
+
       # Create an object with the given conditions and
       # default value.
-      def initialize(conditions, default)
+      def initialize(conditions, default, expression = nil)
         raise(Sequel::Error, 'CaseExpression conditions must be an array with all_two_pairs') unless Array === conditions and conditions.all_two_pairs?
-        @conditions, @default = conditions, default
+        @conditions, @default, @expression = conditions, default, expression
       end
 
       # Delegate the creation of the resulting SQL to the given dataset,
@@ -657,6 +685,34 @@ module Sequel
       end
     end
 
+    # Represents a literal string with placeholders and arguments.
+    # This is necessary to ensure delayed literalization of the arguments
+    # required for the prepared statement support
+    class PlaceholderLiteralString < SpecificExpression
+      # The arguments that will be subsituted into the placeholders.
+      attr_reader :args
+
+      # The literal string containing placeholders
+      attr_reader :str
+
+      # Whether to surround the expression with parantheses
+      attr_reader :parens
+
+      # Create an object with the given conditions and
+      # default value.
+      def initialize(str, args, parens=false)
+        @str = str
+        @args = args
+        @parens = parens
+      end
+
+      # Delegate the creation of the resulting SQL to the given dataset,
+      # since it may be database dependent.
+      def to_s(ds)
+        ds.placeholder_literal_string_sql(self)
+      end
+    end
+
     # Subclass of ComplexExpression where the expression results
     # in a numeric value in SQL.
     class NumericExpression < ComplexExpression
@@ -729,7 +785,7 @@ module Sequel
       def self.like(l, *ces)
         case_insensitive = ces.extract_options![:case_insensitive]
         ces.collect! do |ce|
-          op, expr = Regexp === ce ? [ce.casefold? || case_insensitive ? :'~*' : :~, ce.source] : [case_insensitive ? :ILIKE : :LIKE, ce.to_s]
+          op, expr = Regexp === ce ? [ce.casefold? || case_insensitive ? :'~*' : :~, ce.source] : [case_insensitive ? :ILIKE : :LIKE, ce]
           BooleanExpression.new(op, l, expr)
         end
         ces.length == 1 ? ces.at(0) : BooleanExpression.new(:OR, *ces)
@@ -803,7 +859,7 @@ module Sequel
   # LiteralString is used to represent literal SQL expressions. A 
   # LiteralString is copied verbatim into an SQL statement. Instances of
   # LiteralString can be created by calling String#lit.
-  # LiteralStrings can use all of the SQL::ColumnMethods and the 
+  # LiteralStrings can also use all of the SQL::OrderMethods and the 
   # SQL::ComplexExpressionMethods.
   class LiteralString < ::String
     include SQL::OrderMethods

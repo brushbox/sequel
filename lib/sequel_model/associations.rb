@@ -88,7 +88,7 @@ module Sequel::Model::Associations
   #     after a new item is added to the association.
   #   - :after_load - Symbol, Proc, or array of both/either specifying a callback to call
   #     after the associated record(s) have been retrieved from the database.  Not called
-  #     when eager loading (see the :eager_loader option to accomplish it when eager loading).
+  #     when eager loading via eager_graph, but called when eager loading via eager.
   #   - :after_remove - Symbol, Proc, or array of both/either specifying a callback to call
   #     after an item is removed from the association.
   #   - :allow_eager - If set to false, you cannot load the association eagerly
@@ -113,6 +113,10 @@ module Sequel::Model::Associations
   #     For many_to_one associations, this is ignored unless this association is
   #     being eagerly loaded, as it doesn't save queries unless multiple objects
   #     can be loaded at once.
+  #   - :eager_grapher - A proc to use to implement eager loading via eager graph, overriding the default.
+  #     Takes three arguments, a dataset, an alias to use for the table to graph for this association,
+  #     and the alias that was used for the current table (since you can cascade associations),
+  #     Should return a copy of the dataset with the association graphed into it.
   #   - :eager_loader - A proc to use to implement eager loading, overriding the default.  Takes three arguments,
   #     a key hash (used solely to enhance performance), an array of records,
   #     and a hash of dependent associations.  The associated records should
@@ -135,6 +139,8 @@ module Sequel::Model::Associations
   #     an array with two arguments for the value to specify a limit and offset.
   #   - :order - the column(s) by which to order the association dataset.  Can be a
   #     singular column or an array.
+  #   - :order_eager_graph - Whether to add the order to the dataset's order when graphing
+  #     via eager graph.  Defaults to true, so set to false to disable.
   #   - :read_only - Do not add a setter method (for many_to_one or one_to_many with :one_to_one),
   #     or add_/remove_/remove_all_ methods (for one_to_many, many_to_many)
   #   - :reciprocal - the symbol name of the reciprocal association,
@@ -150,6 +156,8 @@ module Sequel::Model::Associations
   # * :many_to_one:
   #   - :key - foreign_key in current model's table that references
   #     associated model's primary key, as a symbol.  Defaults to :"#{name}_id".
+  #   - :primary_key - column in the associated table that :key option references, as a symbol.
+  #     Defaults to the primary key of the associated table.
   # * :one_to_many:
   #   - :key - foreign key in associated model's table that references
   #     current model's primary key, as a symbol.  Defaults to
@@ -162,15 +170,9 @@ module Sequel::Model::Associations
   #     so using this is similar to using many_to_one, in terms of the methods
   #     it adds, the main difference is that the foreign key is in the associated
   #     table instead of the current table.
+  #   - :primary_key - column in the current table that :key option references, as a symbol.
+  #     Defaults to primary key of the current table.
   # * :many_to_many:
-  #   - :join_table - name of table that includes the foreign keys to both
-  #     the current model and the associated model, as a symbol.  Defaults to the name
-  #     of current model and name of associated model, pluralized,
-  #     underscored, sorted, and joined with '_'.
-  #   - :left_key - foreign key in join table that points to current model's
-  #     primary key, as a symbol. Defaults to :"#{self.name.underscore}_id".
-  #   - :right_key - foreign key in join table that points to associated
-  #     model's primary key, as a symbol.  Defaults to Defaults to :"#{name.to_s.singularize}_id".
   #   - :graph_join_table_block - The block to pass to join_table for
   #     the join table when eagerly loading the association via eager_graph.
   #   - :graph_join_table_conditions - The additional conditions to use on the SQL join for
@@ -183,15 +185,29 @@ module Sequel::Model::Associations
   #     table when eagerly loading the association via eager_graph, instead of the default
   #     conditions specified by the foreign/primary keys.  This option causes the 
   #     :graph_join_table_conditions option to be ignored.
+  #   - :join_table - name of table that includes the foreign keys to both
+  #     the current model and the associated model, as a symbol.  Defaults to the name
+  #     of current model and name of associated model, pluralized,
+  #     underscored, sorted, and joined with '_'.
+  #   - :left_key - foreign key in join table that points to current model's
+  #     primary key, as a symbol. Defaults to :"#{self.name.underscore}_id".
+  #   - :left_primary_key - column in current table that :left_key points to, as a symbol.
+  #     Defaults to primary key of current table.
+  #   - :right_key - foreign key in join table that points to associated
+  #     model's primary key, as a symbol.  Defaults to Defaults to :"#{name.to_s.singularize}_id".
+  #   - :right_primary_key - column in associated table that :right_key points to, as a symbol.
+  #     Defaults to primary key of the associated table.
+  #   - :uniq - Adds a after_load callback that makes the array of objects unique.
   def associate(type, name, opts = {}, &block)
-    raise(Error, 'invalid association type') unless AssociationReflection::ASSOCIATION_TYPES.include?(type)
+    raise(Error, 'invalid association type') unless assoc_class = ASSOCIATION_TYPES[type]
     raise(Error, 'Model.associate name argument must be a symbol') unless Symbol === name
 
     # merge early so we don't modify opts
     opts = opts.merge(:type => type, :name => name, :block => block, :cache => true, :model => self)
-    opts = AssociationReflection.new.merge!(opts)
+    opts = assoc_class.new.merge!(opts)
     opts[:eager_block] = block unless opts.include?(:eager_block)
     opts[:graph_join_type] ||= :left_outer
+    opts[:order_eager_graph] = true unless opts.include?(:order_eager_graph)
     opts[:graph_conditions] = opts[:graph_conditions] ? opts[:graph_conditions].to_a : []
     opts[:graph_select] = Array(opts[:graph_select]) if opts[:graph_select]
     [:before_add, :before_remove, :after_add, :after_remove, :after_load, :extend].each do |cb_type|
@@ -243,29 +259,30 @@ module Sequel::Model::Associations
   
   private
 
-  # Hash storing the association reflections.  Keys are association name
-  # symbols, values are association reflection hashes.
-  def association_reflections
-    @association_reflections ||= {}
+  # Add a method to the association module
+  def association_module_def(name, &block)
+    overridable_methods_module.class_def(name, &block)
   end
-  
+
+  # Add a method to the association module
+  def association_module_private_def(name, &block)
+    association_module_def(name, &block)
+    overridable_methods_module.send(:private, name)
+  end
+
   # Add the add_ instance method 
   def def_add_method(opts)
-    class_def(opts.add_method){|o| add_associated_object(opts, o)}
+    association_module_def(opts.add_method){|o| add_associated_object(opts, o)}
   end
 
   # Adds association methods to the model for *_to_many associations.
   def def_association_dataset_methods(opts)
     # If a block is given, define a helper method for it, because it takes
     # an argument.  This is unnecessary in Ruby 1.9, as that has instance_exec.
-    if opts[:block]
-      class_def(opts.dataset_helper_method, &opts[:block])
-      private opts.dataset_helper_method
-    end
-    class_def(opts._dataset_method, &opts[:dataset])
-    private opts._dataset_method
-    class_def(opts.dataset_method){_dataset(opts)}
-    class_def(opts.association_method){|*reload| load_associated_objects(opts, reload[0])}
+    association_module_private_def(opts.dataset_helper_method, &opts[:block]) if opts[:block]
+    association_module_private_def(opts._dataset_method, &opts[:dataset])
+    association_module_def(opts.dataset_method){_dataset(opts)}
+    association_module_def(opts.association_method){|*reload| load_associated_objects(opts, reload[0])}
   end
 
   # Adds many_to_many association instance methods
@@ -274,38 +291,54 @@ module Sequel::Model::Associations
     model = self
     left = (opts[:left_key] ||= opts.default_left_key)
     right = (opts[:right_key] ||= opts.default_right_key)
+    left_pk = (opts[:left_primary_key] ||= self.primary_key)
     opts[:class_name] ||= name.to_s.singularize.camelize
     join_table = (opts[:join_table] ||= opts.default_join_table)
     left_key_alias = opts[:left_key_alias] ||= :x_foreign_key_x
     left_key_select = opts[:left_key_select] ||= left.qualify(join_table).as(opts[:left_key_alias])
-    opts[:graph_join_table_conditions] = opts[:graph_join_table_conditions] ? opts[:graph_join_table_conditions].to_a : []
+    graph_jt_conds = opts[:graph_join_table_conditions] = opts[:graph_join_table_conditions] ? opts[:graph_join_table_conditions].to_a : []
     opts[:graph_join_table_join_type] ||= opts[:graph_join_type]
-    opts[:dataset] ||= proc{opts.associated_class.inner_join(join_table, [[right, opts.associated_primary_key], [left, pk]])}
+    opts[:after_load].unshift(:array_uniq!) if opts[:uniq]
+    opts[:dataset] ||= proc{opts.associated_class.inner_join(join_table, [[right, opts.right_primary_key], [left, send(left_pk)]])}
     database = db
     
     opts[:eager_loader] ||= proc do |key_hash, records, associations|
-      h = key_hash[model.primary_key]
+      h = key_hash[left_pk]
       records.each{|object| object.associations[name] = []}
-      model.eager_loading_dataset(opts, opts.associated_class.inner_join(join_table, [[right, opts.associated_primary_key], [left, h.keys]]), Array(opts.select) + Array(left_key_select), associations).all do |assoc_record|
+      model.eager_loading_dataset(opts, opts.associated_class.inner_join(join_table, [[right, opts.right_primary_key], [left, h.keys]]), Array(opts.select) + Array(left_key_select), associations).all do |assoc_record|
         next unless objects = h[assoc_record.values.delete(left_key_alias)]
         objects.each{|object| object.associations[name].push(assoc_record)}
       end
     end
     
+    join_type = opts[:graph_join_type]
+    select = opts[:graph_select]
+    use_only_conditions = opts.include?(:graph_only_conditions)
+    only_conditions = opts[:graph_only_conditions]
+    conditions = opts[:graph_conditions]
+    graph_block = opts[:graph_block]
+    use_jt_only_conditions = opts.include?(:graph_join_table_only_conditions)
+    jt_only_conditions = opts[:graph_join_table_only_conditions]
+    jt_join_type = opts[:graph_join_table_join_type]
+    jt_graph_block = opts[:graph_join_table_block]
+    opts[:eager_grapher] ||= proc do |ds, assoc_alias, table_alias|
+      ds = ds.graph(join_table, use_jt_only_conditions ? jt_only_conditions : [[left, left_pk]] + graph_jt_conds, :select=>false, :table_alias=>ds.send(:eager_unique_table_alias, ds, join_table), :join_type=>jt_join_type, :implicit_qualifier=>table_alias, &jt_graph_block)
+      ds.graph(opts.associated_class, use_only_conditions ? only_conditions : [[opts.right_primary_key, right]] + conditions, :select=>select, :table_alias=>assoc_alias, :join_type=>join_type, &graph_block)
+    end
+
     def_association_dataset_methods(opts)
 
     return if opts[:read_only]
 
-    class_def(opts._add_method) do |o|
-      database[join_table].insert(left=>pk, right=>o.pk)
+    association_module_private_def(opts._add_method) do |o|
+      database.dataset.from(join_table).insert(left=>send(left_pk), right=>o.send(opts.right_primary_key))
     end
-    class_def(opts._remove_method) do |o|
-      database[join_table].filter([[left, pk], [right, o.pk]]).delete
+    association_module_private_def(opts._remove_method) do |o|
+      database.dataset.from(join_table).filter([[left, send(left_pk)], [right, o.send(opts.right_primary_key)]]).delete
     end
-    class_def(opts._remove_all_method) do
-      database[join_table].filter(left=>pk).delete
+    association_module_private_def(opts._remove_all_method) do
+      database.dataset.from(join_table).filter(left=>send(left_pk)).delete
     end
-    private opts._add_method, opts._remove_method, opts._remove_all_method
 
     def_add_method(opts)
     def_remove_methods(opts)
@@ -315,43 +348,53 @@ module Sequel::Model::Associations
   def def_many_to_one(opts)
     name = opts[:name]
     model = self
-    opts[:key] = opts.default_right_key unless opts.include?(:key)
+    opts[:key] = opts.default_key unless opts.include?(:key)
     key = opts[:key]
     opts[:class_name] ||= name.to_s.camelize
     opts[:dataset] ||= proc do
       klass = opts.associated_class
-      klass.filter(opts.associated_primary_key.qualify(klass.table_name)=>send(key))
+      klass.filter(opts.primary_key.qualify(klass.table_name)=>send(key))
     end
     opts[:eager_loader] ||= proc do |key_hash, records, associations|
       h = key_hash[key]
       keys = h.keys
+      # Default the cached association to nil, so any object that doesn't have it
+      # populated will have cached the negative lookup.
+      records.each{|object| object.associations[name] = nil}
       # Skip eager loading if no objects have a foreign key for this association
       unless keys.empty?
-        # Default the cached association to nil, so any object that doesn't have it
-        # populated will have cached the negative lookup.
-        records.each{|object| object.associations[name] = nil}
-        model.eager_loading_dataset(opts, opts.associated_class.filter(opts.associated_primary_key.qualify(opts.associated_class.table_name)=>keys),  opts.select, associations).all do |assoc_record|
-          next unless objects = h[assoc_record.pk]
+        klass = opts.associated_class
+        model.eager_loading_dataset(opts, klass.filter(opts.primary_key.qualify(klass.table_name)=>keys), opts.select, associations).all do |assoc_record|
+          next unless objects = h[assoc_record.send(opts.primary_key)]
           objects.each{|object| object.associations[name] = assoc_record}
         end
       end
+    end
+
+    join_type = opts[:graph_join_type]
+    select = opts[:graph_select]
+    use_only_conditions = opts.include?(:graph_only_conditions)
+    only_conditions = opts[:graph_only_conditions]
+    conditions = opts[:graph_conditions]
+    graph_block = opts[:graph_block]
+    opts[:eager_grapher] ||= proc do |ds, assoc_alias, table_alias|
+      ds.graph(opts.associated_class, use_only_conditions ? only_conditions : [[opts.primary_key, key]] + conditions, :select=>select, :table_alias=>assoc_alias, :join_type=>join_type, :implicit_qualifier=>table_alias, &graph_block)
     end
 
     def_association_dataset_methods(opts)
     
     return if opts[:read_only]
 
-    class_def(opts._setter_method){|o| send(:"#{key}=", (o.pk if o))}
-    private opts._setter_method
+    association_module_private_def(opts._setter_method){|o| send(:"#{key}=", (o.send(opts.primary_key) if o))}
 
-    class_def(opts.setter_method) do |o|  
+    association_module_def(opts.setter_method) do |o|  
       raise(Sequel::Error, 'model object does not have a primary key') if o && !o.pk
       old_val = send(opts.association_method)
       return o if old_val == o
       return if old_val and run_association_callbacks(opts, :before_remove, old_val) == false
       return if o and run_association_callbacks(opts, :before_add, o) == false
       send(opts._setter_method, o)
-      @associations[name] = o
+      associations[name] = o
       remove_reciprocal_object(opts, old_val) if old_val
       add_reciprocal_object(opts, o) if o
       run_association_callbacks(opts, :after_add, o) if o
@@ -364,17 +407,19 @@ module Sequel::Model::Associations
   def def_one_to_many(opts)
     name = opts[:name]
     model = self
-    key = (opts[:key] ||= opts.default_left_key)
+    key = (opts[:key] ||= opts.default_key)
+    primary_key = (opts[:primary_key] ||= self.primary_key)
     opts[:class_name] ||= name.to_s.singularize.camelize
     opts[:dataset] ||= proc do
       klass = opts.associated_class
-      klass.filter(key.qualify(klass.table_name) => pk)
+      klass.filter(key.qualify(klass.table_name) => send(primary_key))
     end
     opts[:eager_loader] ||= proc do |key_hash, records, associations|
-      h = key_hash[model.primary_key]
+      h = key_hash[primary_key]
       records.each{|object| object.associations[name] = []}
       reciprocal = opts.reciprocal
-      model.eager_loading_dataset(opts, opts.associated_class.filter(key.qualify(opts.associated_class.table_name)=>h.keys), opts.select, associations).all do |assoc_record|
+      klass = opts.associated_class
+      model.eager_loading_dataset(opts, klass.filter(key.qualify(klass.table_name)=>h.keys), opts.select, associations).all do |assoc_record|
         next unless objects = h[assoc_record[key]]
         objects.each do |object| 
           object.associations[name].push(assoc_record)
@@ -383,44 +428,55 @@ module Sequel::Model::Associations
       end
     end
     
+    join_type = opts[:graph_join_type]
+    select = opts[:graph_select]
+    use_only_conditions = opts.include?(:graph_only_conditions)
+    only_conditions = opts[:graph_only_conditions]
+    conditions = opts[:graph_conditions]
+    graph_block = opts[:graph_block]
+    opts[:eager_grapher] ||= proc do |ds, assoc_alias, table_alias|
+      ds = ds.graph(opts.associated_class, use_only_conditions ? only_conditions : [[key, primary_key]] + conditions, :select=>select, :table_alias=>assoc_alias, :join_type=>join_type, :implicit_qualifier=>table_alias, &graph_block)
+      # We only load reciprocals for one_to_many associations, as other reciprocals don't make sense
+      ds.opts[:eager_graph][:reciprocals][assoc_alias] = opts.reciprocal
+      ds
+    end
+
     def_association_dataset_methods(opts)
     
     unless opts[:read_only]
-      class_def(opts._add_method) do |o|
-        o.send(:"#{key}=", pk)
+      association_module_private_def(opts._add_method) do |o|
+        o.send(:"#{key}=", send(primary_key))
         o.save || raise(Sequel::Error, "invalid associated object, cannot save")
       end
-      private opts._add_method
       def_add_method(opts)
 
       unless opts[:one_to_one]
-        class_def(opts._remove_method) do |o|
+        association_module_private_def(opts._remove_method) do |o|
           o.send(:"#{key}=", nil)
           o.save || raise(Sequel::Error, "invalid associated object, cannot save")
         end
-        class_def(opts._remove_all_method) do
-          opts.associated_class.filter(key=>pk).update(key=>nil)
+        association_module_private_def(opts._remove_all_method) do
+          opts.associated_class.filter(key=>send(primary_key)).update(key=>nil)
         end
-        private opts._remove_method, opts._remove_all_method
         def_remove_methods(opts)
       end
     end
     if opts[:one_to_one]
-      private opts.association_method, opts.dataset_method
+      overridable_methods_module.send(:private, opts.association_method, opts.dataset_method)
       n = name.to_s.singularize.to_sym
       raise(Sequel::Error, "one_to_many association names should still be plural even when using the :one_to_one option") if n == name
-      class_def(n) do |*o|
+      association_module_def(n) do |*o|
         objs = send(name, *o)
         raise(Sequel::Error, "multiple values found for a one-to-one relationship") if objs.length > 1
         objs.first
       end
       unless opts[:read_only]
-        private opts.add_method
-        class_def(:"#{n}=") do |o|
+        overridable_methods_module.send(:private, opts.add_method)
+        association_module_def(:"#{n}=") do |o|
           klass = opts.associated_class
           model.db.transaction do
             send(opts.add_method, o)
-            klass.filter(Sequel::SQL::BooleanExpression.new(:AND, {key=>pk}, ~{klass.primary_key=>o.pk}.sql_expr)).update(key=>nil)
+            klass.filter(Sequel::SQL::BooleanExpression.new(:AND, {key=>send(primary_key)}, ~{klass.primary_key=>o.pk}.sql_expr)).update(key=>nil)
           end
         end
       end
@@ -429,7 +485,7 @@ module Sequel::Model::Associations
   
   # Add the remove_ and remove_all instance methods
   def def_remove_methods(opts)
-    class_def(opts.remove_method){|o| remove_associated_object(opts, o)}
-    class_def(opts.remove_all_method){remove_all_associated_objects(opts)}
+    association_module_def(opts.remove_method){|o| remove_associated_object(opts, o)}
+    association_module_def(opts.remove_all_method){remove_all_associated_objects(opts)}
   end
 end

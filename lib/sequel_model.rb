@@ -13,17 +13,14 @@ module Sequel
   # Lets you create a Model subclass with its dataset already set.
   # source can be an existing dataset or a symbol (in which case
   # it will create a dataset using the default database with 
-  # source as the table name.
+  # source as the table name).
   #
   # Example:
   #   class Comment < Sequel::Model(:something)
   #     table_name # => :something
   #   end
   def self.Model(source)
-    return @models[source] if @models[source]
-    klass = Class.new(Model)
-    klass.set_dataset(source.is_a?(Dataset) ? source : Model.db[source])
-    @models[source] = klass
+    @models[source] ||= Class.new(Model).set_dataset(source)
   end
 
   # Model has some methods that are added via metaprogramming:
@@ -53,8 +50,9 @@ module Sequel
   #   cache_store, cache_ttl, dataset_methods, primary_key, restricted_columns,
   #   sti_dataset, and sti_key.  You should not usually need to
   #   access these directly.
-  # * The following class level attr_accessors are created: raise_on_save_failure,
-  #   strict_param_setting, typecast_empty_string_to_nil, and typecast_on_assignment:
+  # * The following class level attr_accessors are created: raise_on_typecast_failure,
+  #   raise_on_save_failure, strict_param_setting, typecast_empty_string_to_nil,
+  #   and typecast_on_assignment:
   #
   #     # Don't raise an error if a validation attempt fails in
   #     # save/create/save_changes/etc.
@@ -75,6 +73,11 @@ module Sequel
   #     Model.typecast_empty_string_to_nil = false
   #     m.number = ''
   #     m.number # => '' instead of nil
+  #     # Don't raise if unable to typecast data for a column
+  #     Model.typecast_empty_string_to_nil = true
+  #     Model.raise_on_typecast_failure = false
+  #     m.not_null_column = '' # => nil
+  #     m.number = 'A' # => 'A'
   #
   # * The following class level method aliases are defined:
   #   * Model.dataset= => set_dataset

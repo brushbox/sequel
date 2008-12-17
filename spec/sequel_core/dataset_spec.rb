@@ -161,6 +161,16 @@ context "A simple dataset" do
     @dataset.select_sql(:sql => 'xxx yyy zzz').should ==
       "xxx yyy zzz"
   end
+
+  specify "should use the :sql option for all sql methods" do
+    sql = "X"
+    ds = Sequel::Dataset.new(nil, :sql=>sql)
+    ds.sql.should == sql
+    ds.select_sql.should == sql
+    ds.insert_sql.should == sql
+    ds.delete_sql.should == sql
+    ds.update_sql.should == sql
+  end
 end
 
 context "A dataset with multiple tables in its FROM clause" do
@@ -178,6 +188,26 @@ context "A dataset with multiple tables in its FROM clause" do
 
   specify "should generate a select query FROM all specified tables" do
     @dataset.select_sql.should == "SELECT * FROM t1, t2"
+  end
+end
+
+context "Dataset#exists" do
+  setup do
+    @ds1 = Sequel::Dataset.new(nil).from(:test)
+    @ds2 = @ds1.filter(:price < 100)
+    @ds3 = @ds1.filter(:price > 50)
+  end
+  
+  specify "should work in filters" do
+    @ds1.filter(@ds2.exists).sql.should ==
+      'SELECT * FROM test WHERE (EXISTS (SELECT * FROM test WHERE (price < 100)))'
+    @ds1.filter(@ds2.exists & @ds3.exists).sql.should ==
+      'SELECT * FROM test WHERE (EXISTS (SELECT * FROM test WHERE (price < 100)) AND EXISTS (SELECT * FROM test WHERE (price > 50)))'
+  end
+
+  specify "should work in select" do
+    @ds1.select(@ds2.exists.as(:a), @ds3.exists.as(:b)).sql.should ==
+      'SELECT EXISTS (SELECT * FROM test WHERE (price < 100)) AS a, EXISTS (SELECT * FROM test WHERE (price > 50)) AS b FROM test'
   end
 end
 
@@ -548,7 +578,7 @@ context "a grouped dataset" do
   specify "should format the right statement for counting (as a subquery)" do
     db = MockDatabase.new
     db[:test].select(:name).group(:name).count
-    db.sqls.should == ["SELECT COUNT(*) FROM (SELECT name FROM test GROUP BY name) t1 LIMIT 1"]
+    db.sqls.should == ["SELECT COUNT(*) FROM (SELECT name FROM test GROUP BY name) AS t1 LIMIT 1"]
   end
 end
 
@@ -674,37 +704,34 @@ context "Dataset#from" do
 
   specify "should format a Dataset as a subquery if it has had options set" do
     @dataset.from(@dataset.from(:a).where(:a=>1)).select_sql.should ==
-      "SELECT * FROM (SELECT * FROM a WHERE (a = 1)) t1"
+      "SELECT * FROM (SELECT * FROM a WHERE (a = 1)) AS t1"
   end
   
   specify "should automatically alias sub-queries" do
     @dataset.from(@dataset.from(:a).group(:b)).select_sql.should ==
-      "SELECT * FROM (SELECT * FROM a GROUP BY b) t1"
+      "SELECT * FROM (SELECT * FROM a GROUP BY b) AS t1"
       
     d1 = @dataset.from(:a).group(:b)
     d2 = @dataset.from(:c).group(:d)
     
     @dataset.from(d1, d2).sql.should == 
-      "SELECT * FROM (SELECT * FROM a GROUP BY b) t1, (SELECT * FROM c GROUP BY d) t2"
+      "SELECT * FROM (SELECT * FROM a GROUP BY b) AS t1, (SELECT * FROM c GROUP BY d) AS t2"
   end
   
   specify "should accept a hash for aliasing" do
     @dataset.from(:a => :b).sql.should ==
-      "SELECT * FROM a b"
+      "SELECT * FROM a AS b"
       
     @dataset.from(:a => 'b').sql.should ==
-      "SELECT * FROM a b"
-
-    @dataset.from(:a => :c[:d]).sql.should ==
-      "SELECT * FROM a c(d)"
+      "SELECT * FROM a AS b"
 
     @dataset.from(@dataset.from(:a).group(:b) => :c).sql.should ==
-      "SELECT * FROM (SELECT * FROM a GROUP BY b) c"
+      "SELECT * FROM (SELECT * FROM a GROUP BY b) AS c"
   end
 
   specify "should always use a subquery if given a dataset" do
     @dataset.from(@dataset.from(:a)).select_sql.should ==
-      "SELECT * FROM (SELECT * FROM a) t1"
+      "SELECT * FROM (SELECT * FROM a) AS t1"
   end
   
   specify "should raise if no source is given" do
@@ -717,6 +744,15 @@ context "Dataset#from" do
     
     @dataset.from(:a[:i]).select_sql.should ==
       "SELECT * FROM a(i)"
+  end
+
+  specify "should accept :schema__table___alias symbol format" do
+    @dataset.from(:abc__def).select_sql.should ==
+      "SELECT * FROM abc.def"
+    @dataset.from(:abc__def___d).select_sql.should ==
+      "SELECT * FROM abc.def AS d"
+    @dataset.from(:abc___def).select_sql.should ==
+      "SELECT * FROM abc AS def"
   end
 end
 
@@ -975,7 +1011,7 @@ context "Dataset#limit" do
   specify "should work with fixed sql datasets" do
     @dataset.opts[:sql] = 'select * from cccc'
     @dataset.limit(6, 10).sql.should ==
-      'SELECT * FROM (select * from cccc) t1 LIMIT 6 OFFSET 10'
+      'SELECT * FROM (select * from cccc) AS t1 LIMIT 6 OFFSET 10'
   end
   
   specify "should raise an error if an invalid limit or offset is used" do
@@ -1092,7 +1128,7 @@ context "Dataset#uniq" do
 
   specify "should do a subselect for count" do
     @dataset.uniq.count
-    @db.sqls.should == ['SELECT COUNT(*) FROM (SELECT DISTINCT name FROM test) t1 LIMIT 1']
+    @db.sqls.should == ['SELECT COUNT(*) FROM (SELECT DISTINCT name FROM test) AS t1 LIMIT 1']
   end
 end
 
@@ -1104,8 +1140,9 @@ context "Dataset#count" do
       end
       
       def fetch_rows(sql)
+        @columns = [sql =~ /SELECT COUNT/i ? :count : :a]
         @@sql = sql
-        yield({1 => 1})
+        yield({@columns.first=>1})
       end
     end
     @dataset = @c.new(nil).from(:test)
@@ -1128,12 +1165,35 @@ context "Dataset#count" do
   specify "should count properly for datasets with fixed sql" do
     @dataset.opts[:sql] = "select abc from xyz"
     @dataset.count.should == 1
-    @c.sql.should == "SELECT COUNT(*) FROM (select abc from xyz) t1 LIMIT 1"
+    @c.sql.should == "SELECT COUNT(*) FROM (select abc from xyz) AS t1 LIMIT 1"
+  end
+
+  specify "should count properly when using UNION, INTERSECT, or EXCEPT" do
+    @dataset.union(@dataset).count.should == 1
+    @c.sql.should == "SELECT COUNT(*) FROM (SELECT * FROM test UNION SELECT * FROM test) AS t1 LIMIT 1"
+    @dataset.intersect(@dataset).count.should == 1
+    @c.sql.should == "SELECT COUNT(*) FROM (SELECT * FROM test INTERSECT SELECT * FROM test) AS t1 LIMIT 1"
+    @dataset.except(@dataset).count.should == 1
+    @c.sql.should == "SELECT COUNT(*) FROM (SELECT * FROM test EXCEPT SELECT * FROM test) AS t1 LIMIT 1"
   end
 
   specify "should return limit if count is greater than it" do
     @dataset.limit(5).count.should == 1
-    @c.sql.should == "SELECT COUNT(*) FROM (SELECT * FROM test LIMIT 5) t1 LIMIT 1"
+    @c.sql.should == "SELECT COUNT(*) FROM (SELECT * FROM test LIMIT 5) AS t1 LIMIT 1"
+  end
+  
+  it "should work on a graphed_dataset" do
+    @dataset.should_receive(:columns).twice.and_return([:a])
+    @dataset.graph(@dataset, [:a], :table_alias=>:test2).count.should == 1
+    @c.sql.should == 'SELECT COUNT(*) FROM test LEFT OUTER JOIN test AS test2 USING (a) LIMIT 1'
+  end
+
+  specify "should not cache the columns value" do
+    ds = @dataset.from(:blah)
+    ds.columns.should == [:a]
+    ds.count.should == 1
+    @c.sql.should == 'SELECT COUNT(*) FROM blah LIMIT 1'
+    ds.columns.should == [:a]
   end
 end
 
@@ -1261,14 +1321,43 @@ context "Dataset#join_table" do
       'SELECT * FROM "items" INNER JOIN "categories" ON ("categories"."category_id" = "items"."id")'
   end
   
-  specify "should support aliased tables" do
+  specify "should support aliased tables using the deprecated argument" do
     @d.from('stats').join('players', {:id => :player_id}, 'p').sql.should ==
       'SELECT * FROM "stats" INNER JOIN "players" AS "p" ON ("p"."id" = "stats"."player_id")'
+  end
 
+  specify "should support aliased tables using the :table_alias option" do
+    @d.from('stats').join('players', {:id => :player_id}, :table_alias=>:p).sql.should ==
+      'SELECT * FROM "stats" INNER JOIN "players" AS "p" ON ("p"."id" = "stats"."player_id")'
+  end
+  
+  specify "should support using an alias for the FROM when doing the first join with unqualified condition columns" do
     ds = MockDataset.new(nil).from(:foo => :f)
     ds.quote_identifiers = true
     ds.join_table(:inner, :bar, :id => :bar_id).sql.should ==
-      'SELECT * FROM "foo" "f" INNER JOIN "bar" ON ("bar"."id" = "f"."bar_id")'
+      'SELECT * FROM "foo" AS "f" INNER JOIN "bar" ON ("bar"."id" = "f"."bar_id")'
+  end
+  
+  specify "should support implicit schemas in from table symbols" do
+    @d.from(:s__t).join(:u__v, {:id => :player_id}).sql.should ==
+      'SELECT * FROM "s"."t" INNER JOIN "u"."v" ON ("u"."v"."id" = "s"."t"."player_id")'
+  end
+
+  specify "should support implicit aliases in from table symbols" do
+    @d.from(:t___z).join(:v___y, {:id => :player_id}).sql.should ==
+      'SELECT * FROM "t" AS "z" INNER JOIN "v" AS "y" ON ("y"."id" = "z"."player_id")'
+    @d.from(:s__t___z).join(:u__v___y, {:id => :player_id}).sql.should ==
+      'SELECT * FROM "s"."t" AS "z" INNER JOIN "u"."v" AS "y" ON ("y"."id" = "z"."player_id")'
+  end
+  
+  specify "should support AliasedExpressions" do
+    @d.from(:s.as(:t)).join(:u.as(:v), {:id => :player_id}).sql.should ==
+      'SELECT * FROM "s" AS "t" INNER JOIN "u" AS "v" ON ("v"."id" = "t"."player_id")'
+  end
+
+  specify "should support the :implicit_qualifier option" do
+    @d.from('stats').join('players', {:id => :player_id}, :implicit_qualifier=>:p).sql.should ==
+      'SELECT * FROM "stats" INNER JOIN "players" ON ("players"."id" = "p"."player_id")'
   end
   
   specify "should allow for arbitrary conditions in the JOIN clause" do
@@ -1754,6 +1843,11 @@ context "Dataset#single_value" do
   specify "should return nil if no records" do
     @e.single_value.should be_nil
   end
+  
+  it "should work on a graphed_dataset" do
+    @d.should_receive(:columns).twice.and_return([:a])
+    @d.graph(@d, [:a], :table_alias=>:test2).single_value.should == 'SELECT test.a, test2.a AS test2_a FROM test LEFT OUTER JOIN test AS test2 USING (a) LIMIT 1'
+  end
 end
 
 context "Dataset#get" do
@@ -2141,7 +2235,7 @@ context "A paginated dataset" do
   specify "should work with fixed sql" do
     ds = @d.clone(:sql => 'select * from blah')
     ds.meta_def(:count) {150}
-    ds.paginate(2, 50).sql.should == 'SELECT * FROM (select * from blah) t1 LIMIT 50 OFFSET 50'
+    ds.paginate(2, 50).sql.should == 'SELECT * FROM (select * from blah) AS t1 LIMIT 50 OFFSET 50'
   end
 end
 
@@ -2301,6 +2395,17 @@ context "Dataset#multi_insert" do
     ]
   end
   
+  specify "should accept string keys as column names" do
+    @ds.multi_insert([{'x'=>1, 'y'=>2}, {'x'=>3, 'y'=>4}])
+    @ds.multi_insert(['x', 'y'], [[1, 2], [3, 4]])
+    @db.sqls.should == [
+      'BEGIN',
+      "INSERT INTO items (x, y) VALUES (1, 2)",
+      "INSERT INTO items (x, y) VALUES (3, 4)",
+      'COMMIT'
+    ] * 2
+  end
+
   specify "should accept a columns array and a values array" do
     @ds.multi_insert([:x, :y], [[1, 2], [3, 4]])
     @db.sqls.should == [
@@ -2815,14 +2920,12 @@ end
 context "Dataset#table_exists?" do
   setup do
     @db = DummyMummyDatabase.new
-    @db.stub!(:tables).and_return([:a, :b])
+    @db.instance_variable_set(:@schemas, {:a=>[]})
     @db2 = DummyMummyDatabase.new
   end
   
-  specify "should use Database#tables if available" do
+  specify "should use the database schema if available" do
     @db[:a].table_exists?.should be_true
-    @db[:b].table_exists?.should be_true
-    @db[:c].table_exists?.should be_false
   end
   
   specify "should otherwise try to select the first record from the table's dataset" do
@@ -2924,6 +3027,11 @@ context "Dataset#grep" do
     @ds.grep(:title, [/^ruby/, 'ruby']).sql.should ==
       "SELECT * FROM posts WHERE (((title ~ '^ruby') OR (title LIKE 'ruby')))"
   end
+
+  specify "should support searching against other columns" do
+    @ds.grep(:title, :body).sql.should ==
+      "SELECT * FROM posts WHERE ((title LIKE body))"
+  end
 end
 
 context "Sequel.use_parse_tree" do
@@ -2989,10 +3097,14 @@ context "Dataset prepared statements and bound variables " do
     def @db.execute(sql, opts={})
       @sqls << sql
     end
-    @ds = @db[:items]
-    def @ds.fetch_rows(sql, &block)
-      execute(sql)
+    def @db.dataset
+      ds = super()
+      def ds.fetch_rows(sql, &block)
+        execute(sql)
+      end
+      ds
     end
+    @ds = @db[:items]
   end
   
   specify "#call should take a type and bind hash and interpolate it" do
@@ -3032,6 +3144,36 @@ context "Dataset prepared statements and bound variables " do
   specify "#inspect should indicate it is a prepared statement with the prepared SQL" do
     @ds.filter(:num=>:$n).prepare(:select, :sn).inspect.should == \
       '<Sequel::Dataset/PreparedStatement "SELECT * FROM items WHERE (num = $n)">'
+  end
+    
+  specify "should handle literal strings" do
+    @ds.filter("num = ?", :$n).call(:select, :n=>1)
+    @db.sqls.should == ['SELECT * FROM items WHERE (num = 1)']
+  end
+    
+  specify "should handle datasets using static sql and placeholders" do
+    @db["SELECT * FROM items WHERE (num = ?)", :$n].call(:select, :n=>1)
+    @db.sqls.should == ['SELECT * FROM items WHERE (num = 1)']
+  end
+    
+  specify "should handle subselects" do
+    @ds.filter(:$b).filter(:num=>@ds.select(:num).filter(:num=>:$n)).filter(:$c).call(:select, :n=>1, :b=>0, :c=>2)
+    @db.sqls.should == ['SELECT * FROM items WHERE ((0 AND (num IN (SELECT num FROM items WHERE (num = 1)))) AND 2)']
+  end
+    
+  specify "should handle subselects in subselects" do
+    @ds.filter(:$b).filter(:num=>@ds.select(:num).filter(:num=>@ds.select(:num).filter(:num=>:$n))).call(:select, :n=>1, :b=>0)
+    @db.sqls.should == ['SELECT * FROM items WHERE (0 AND (num IN (SELECT num FROM items WHERE (num IN (SELECT num FROM items WHERE (num = 1))))))']
+  end
+    
+  specify "should handle subselects with literal strings" do
+    @ds.filter(:$b).filter(:num=>@ds.select(:num).filter("num = ?", :$n)).call(:select, :n=>1, :b=>0)
+    @db.sqls.should == ['SELECT * FROM items WHERE (0 AND (num IN (SELECT num FROM items WHERE (num = 1))))']
+  end
+    
+  specify "should handle subselects with static sql and placeholders" do
+    @ds.filter(:$b).filter(:num=>@db["SELECT num FROM items WHERE (num = ?)", :$n]).call(:select, :n=>1, :b=>0)
+    @db.sqls.should == ['SELECT * FROM items WHERE (0 AND (num IN (SELECT num FROM items WHERE (num = 1))))']
   end
 end
 
@@ -3083,5 +3225,118 @@ context "Sequel::Dataset#server" do
       ['INSERT INTO items (a) VALUES (1)', :i],
       ['DELETE FROM items', :d],
       ['UPDATE items SET a = (a + 1)', :u]]
+  end
+end
+
+context "Sequel::Dataset #set_defaults" do
+  before do
+    @ds = Sequel::Dataset.new(nil).from(:items).set_defaults(:x=>1)
+  end
+
+  specify "should set the default values for inserts" do
+    @ds.insert_sql.should == "INSERT INTO items (x) VALUES (1)"
+    @ds.insert_sql(:x=>2).should == "INSERT INTO items (x) VALUES (2)"
+    @ds.insert_sql(:y=>2).should =~ /INSERT INTO items \([xy], [xy]\) VALUES \([21], [21]\)/
+    @ds.set_defaults(:y=>2).insert_sql.should =~ /INSERT INTO items \([xy], [xy]\) VALUES \([21], [21]\)/
+    @ds.set_defaults(:x=>2).insert_sql.should == "INSERT INTO items (x) VALUES (2)"
+  end
+
+  specify "should set the default values for updates" do
+    @ds.update_sql.should == "UPDATE items SET x = 1"
+    @ds.update_sql(:x=>2).should == "UPDATE items SET x = 2"
+    @ds.update_sql(:y=>2).should =~ /UPDATE items SET (x = 1|y = 2), (x = 1|y = 2)/
+    @ds.set_defaults(:y=>2).update_sql.should =~ /UPDATE items SET (x = 1|y = 2), (x = 1|y = 2)/
+    @ds.set_defaults(:x=>2).update_sql.should == "UPDATE items SET x = 2"
+  end
+end
+
+context "Sequel::Dataset #set_overrides" do
+  before do
+    @ds = Sequel::Dataset.new(nil).from(:items).set_overrides(:x=>1)
+  end
+
+  specify "should override the given values for inserts" do
+    @ds.insert_sql.should == "INSERT INTO items (x) VALUES (1)"
+    @ds.insert_sql(:x=>2).should == "INSERT INTO items (x) VALUES (1)"
+    @ds.insert_sql(:y=>2).should =~ /INSERT INTO items \([xy], [xy]\) VALUES \([21], [21]\)/
+    @ds.set_overrides(:y=>2).insert_sql.should =~ /INSERT INTO items \([xy], [xy]\) VALUES \([21], [21]\)/
+    @ds.set_overrides(:x=>2).insert_sql.should == "INSERT INTO items (x) VALUES (1)"
+  end
+
+  specify "should override the given values for updates" do
+    @ds.update_sql.should == "UPDATE items SET x = 1"
+    @ds.update_sql(:x=>2).should == "UPDATE items SET x = 1"
+    @ds.update_sql(:y=>2).should =~ /UPDATE items SET (x = 1|y = 2), (x = 1|y = 2)/
+    @ds.set_overrides(:y=>2).update_sql.should =~ /UPDATE items SET (x = 1|y = 2), (x = 1|y = 2)/
+    @ds.set_overrides(:x=>2).update_sql.should == "UPDATE items SET x = 1"
+  end
+end
+
+context "Sequel::Dataset#each" do
+  before do
+    @ds = Sequel::Dataset.new(nil).from(:items)
+    def @ds.fetch_rows(sql)
+      @columns = /count/i.match(sql) ? [:count] : [:a]
+      yield({@columns.first=>sql})
+    end
+  end
+
+  specify "should not set the columns if passing an option that modifies them" do
+    @ds.each(:select=>[:count]){}
+    @ds.columns.should == [:a]
+    @ds.each(:from=>[:count]){} 
+    @ds.columns.should == [:a]
+    @ds.each(:join=>[Sequel::SQL::JoinClause.new(:natural, :count)]){}
+    @ds.columns.should == [:a]
+    @ds.each(:sql=>'SELECT COUNT'){}
+    @ds.columns.should == [:a]
+  end
+
+  specify "should have the correct columns inside the block regardless" do
+    @ds.each(:select=>[:count]) do |x|
+      x[:count].should == 'SELECT count FROM items'
+      @ds.columns.should == [:count]
+    end
+    @ds.each(:from=>[:count]) do |x|
+      x[:count].should == 'SELECT * FROM count'
+      @ds.columns.should == [:count]
+    end
+    @ds.each(:join=>[Sequel::SQL::JoinClause.new(:natural, :count)]) do |x|
+      x[:count].should == 'SELECT * FROM items NATURAL JOIN count'
+      @ds.columns.should == [:count]
+    end
+    @ds.each(:sql=>'SELECT COUNT') do |x|
+      x[:count].should == 'SELECT COUNT'
+      @ds.columns.should == [:count]
+    end
+  end
+end
+
+context Sequel::Dataset::UnsupportedIntersectExcept do
+  before do
+    @ds = Sequel::Dataset.new(nil).from(:items)
+    @ds2 = Sequel::Dataset.new(nil).from(:i)
+    @ds.extend(Sequel::Dataset::UnsupportedIntersectExcept)
+  end
+
+  specify "should raise an error if INTERSECT or EXCEPT is USED" do
+    @ds.union(@ds2).sql.should == 'SELECT * FROM items UNION SELECT * FROM i'
+    proc{@ds.intersect(@ds2)}.should raise_error(Sequel::Error)
+    proc{@ds.except(@ds2)}.should raise_error(Sequel::Error)
+  end
+end
+
+context Sequel::Dataset::UnsupportedIntersectExceptAll do
+  before do
+    @ds = Sequel::Dataset.new(nil).from(:items)
+    @ds2 = Sequel::Dataset.new(nil).from(:i)
+    @ds.extend(Sequel::Dataset::UnsupportedIntersectExceptAll)
+  end
+
+  specify "should raise an error if INTERSECT or EXCEPT is USED" do
+    @ds.intersect(@ds2).sql.should == 'SELECT * FROM items INTERSECT SELECT * FROM i'
+    @ds.except(@ds2).sql.should == 'SELECT * FROM items EXCEPT SELECT * FROM i'
+    proc{@ds.intersect(@ds2, true)}.should raise_error(Sequel::Error)
+    proc{@ds.except(@ds2, true)}.should raise_error(Sequel::Error)
   end
 end

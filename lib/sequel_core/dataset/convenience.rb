@@ -135,7 +135,7 @@ module Sequel
       elsif args[0].is_a?(Array) && args[1].is_a?(Dataset)
         table = @opts[:from].first
         columns, dataset = *args
-        sql = "INSERT INTO #{quote_identifier(table)} #{literal(columns)} VALUES #{literal(dataset)}"
+        sql = "INSERT INTO #{quote_identifier(table)} (#{identifier_list(columns)}) VALUES #{literal(dataset)}"
         return @db.transaction{execute_dui(sql)}
       else
         # we assume that an array of hashes is given
@@ -184,7 +184,7 @@ module Sequel
     # Returns the first value of the first record in the dataset.
     # Returns nil if dataset is empty.
     def single_value(opts = nil)
-      if r = naked.single_record(opts)
+      if r = single_record((opts||{}).merge(:graph=>false, :naked=>true))
         r.values.first
       end
     end
@@ -198,20 +198,11 @@ module Sequel
     # if the dataset has fixed SQL or selects from another dataset
     # or more than one table.
     def table_exists?
-      if @opts[:sql]
-        raise Sequel::Error, "this dataset has fixed SQL"
-      end
-      
-      if @opts[:from].size != 1
-        raise Sequel::Error, "this dataset selects from multiple sources"
-      end
-      
+      raise(Sequel::Error, "this dataset has fixed SQL") if @opts[:sql]
+      raise(Sequel::Error, "this dataset selects from multiple sources") if @opts[:from].size != 1
       t = @opts[:from].first
-      if t.is_a?(Dataset)
-        raise Sequel::Error, "this dataset selects from a sub query"
-      end
-      
-      @db.table_exists?(t.to_sym)
+      raise(Sequel::Error, "this dataset selects from a sub query") if t.is_a?(Dataset)
+      @db.table_exists?(t)
     end
 
     # Returns a string in CSV format containing the dataset records. By 

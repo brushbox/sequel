@@ -53,6 +53,16 @@ class Module
   private
 
   # Define instance method(s) that calls class method(s) of the
+  # same name, caching the result in an instance variable.  Define
+  # standard attr_writer method for modifying that instance variable
+  def class_attr_overridable(*meths)
+    meths.each{|meth| class_eval("def #{meth}; @#{meth}.nil? ? (@#{meth} = self.class.#{meth}) : @#{meth} end")}
+    attr_writer(*meths) 
+    public(*meths) 
+    public(*meths.collect{|m|"#{m}="}) 
+  end
+
+  # Define instance method(s) that calls class method(s) of the
   # same name. Replaces the construct:
   #
   #   define_method(meth){self.class.send(meth)}
@@ -160,18 +170,18 @@ class String
   # Converts a string into a Date object.
   def to_date
     begin
-      Date.parse(self)
+      Date.parse(self, Sequel.convert_two_digit_years)
     rescue => e
-      raise Sequel::Error::InvalidValue, "Invalid date value '#{self}' (#{e.message})"
+      raise Sequel::Error::InvalidValue, "Invalid Date value '#{self}' (#{e.message})"
     end
   end
 
   # Converts a string into a DateTime object.
   def to_datetime
     begin
-      DateTime.parse(self)
+      DateTime.parse(self, Sequel.convert_two_digit_years)
     rescue => e
-      raise Sequel::Error::InvalidValue, "Invalid date value '#{self}' (#{e.message})"
+      raise Sequel::Error::InvalidValue, "Invalid DateTime value '#{self}' (#{e.message})"
     end
   end
 
@@ -179,9 +189,13 @@ class String
   # value of Sequel.datetime_class
   def to_sequel_time
     begin
-      Sequel.datetime_class.parse(self)
+      if Sequel.datetime_class == DateTime
+        DateTime.parse(self, Sequel.convert_two_digit_years)
+      else
+        Sequel.datetime_class.parse(self)
+      end
     rescue => e
-      raise Sequel::Error::InvalidValue, "Invalid time value '#{self}' (#{e.message})"
+      raise Sequel::Error::InvalidValue, "Invalid #{Sequel.datetime_class} value '#{self}' (#{e.message})"
     end
   end
 
@@ -190,7 +204,7 @@ class String
     begin
       Time.parse(self)
     rescue => e
-      raise Sequel::Error::InvalidValue, "Invalid time value '#{self}' (#{e.message})"
+      raise Sequel::Error::InvalidValue, "Invalid Time value '#{self}' (#{e.message})"
     end
   end
 end

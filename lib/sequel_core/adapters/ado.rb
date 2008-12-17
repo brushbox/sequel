@@ -14,24 +14,24 @@ module Sequel
     class Database < Sequel::Database
       set_adapter_scheme :ado
 
-      def connect(server)
-        opts = server_opts(server)
+      def initialize(opts)
+        super(opts)
         opts[:driver] ||= 'SQL Server'
         case opts[:driver]
         when 'SQL Server'
           require 'sequel_core/adapters/shared/mssql'
           extend Sequel::MSSQL::DatabaseMethods
         end
+      end
+
+      def connect(server)
+        opts = server_opts(server)
         s = "driver=#{opts[:driver]};server=#{opts[:host]};database=#{opts[:database]}#{";uid=#{opts[:user]};pwd=#{opts[:password]}" if opts[:user]}"
         handle = WIN32OLE.new('ADODB.Connection')
         handle.Open(s)
         handle
       end
       
-      def disconnect
-        @pool.disconnect {|conn| conn.Close}
-      end
-    
       def dataset(opts = nil)
         ADO::Dataset.new(self, opts)
       end
@@ -45,20 +45,15 @@ module Sequel
         end
       end
       alias_method :do, :execute
+
+      private
+
+      def disconnect_connection(conn)
+        conn.Close
+      end
     end
     
     class Dataset < Sequel::Dataset
-      def literal(v)
-        case v
-        when Time
-          literal(v.iso8601)
-        when Date, DateTime
-          literal(v.to_s)
-        else
-          super
-        end
-      end
-
       def fetch_rows(sql)
         execute(sql) do |s|
           @columns = s.Fields.extend(Enumerable).map do |column|

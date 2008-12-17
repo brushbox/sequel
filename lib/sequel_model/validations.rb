@@ -1,5 +1,8 @@
 module Sequel
   class Model
+    # Validations without an :if option are always run
+    DEFAULT_VALIDATION_IF_PROC = proc{true}
+
     # The Validation module houses a couple of classes used by Sequel's
     # validation code.
     module Validation
@@ -15,19 +18,25 @@ module Sequel
         def add(att, msg)
           self[att] << msg
         end
+
+        # Return the total number of error messages.
+        def count
+          full_messages.length
+        end
         
         # Returns an array of fully-formatted error messages.
         def full_messages
           inject([]) do |m, kv| 
             att, errors = *kv
-            errors.each {|e| m << "#{att} #{e}"}
+            errors.each {|e| m << "#{Array(att).join(' and ')} #{e}"}
             m
           end
         end
         
-        # Returns the errors for the given attribute.
+        # Returns the array of errors for the given attribute, or nil
+        # if there are no errors for the attribute.
         def on(att)
-          self[att]
+          self[att] if include?(att)
         end
       end
   
@@ -84,7 +93,12 @@ module Sequel
         superclass.validate(o)
       end
       validations.each do |att, procs|
-        v = o.send(att)
+        v = case att
+        when Array
+          att.collect{|a| o.send(a)}
+        else
+          o.send(att)
+        end
         procs.each {|tag, p| p.call(o, att, v)}
       end
     end
@@ -296,10 +310,15 @@ module Sequel
     end
 
     # Validates only if the fields in the model (specified by atts) are
-    # unique in the database.  You should also add a unique index in the
+    # unique in the database.  Pass an array of fields instead of multiple
+    # fields to specify that the combination of fields must be unique,
+    # instead of that each field should have a unique value.
+    #
+    # You should also add a unique index in the
     # database, as this suffers from a fairly obvious race condition.
     #
     # Possible Options:
+    # * :allow_nil - Whether to skip the validation if the value(s) is/are nil (default: false)
     # * :if - A symbol (indicating an instance_method) or proc (which is instance_evaled)
     #   skipping this validation if it returns nil or false.
     # * :message - The message to use (default: 'is already taken')
@@ -311,8 +330,12 @@ module Sequel
 
       atts << {:if=>opts[:if], :tag=>opts[:tag]||:uniqueness}
       validates_each(*atts) do |o, a, v|
-        next if v.blank? 
-        num_dups = o.class.filter(a => v).count
+        error_field = a
+        a = Array(a)
+        v = Array(v)
+        next unless v.any? or opts[:allow_nil] == false
+        ds = o.class.filter(a.zip(v))
+        num_dups = ds.count
         allow = if num_dups == 0
           # No unique value in the database
           true
@@ -323,13 +346,13 @@ module Sequel
         elsif o.new?
           # New record, but unique value already exists in the database
           false
-        elsif o.class[a => v].pk == o.pk
+        elsif ds.first === o
           # Unique value exists in database, but for the same record, so the update won't cause a duplicate record
           true
         else
           false
         end
-        o.errors[a] << opts[:message] unless allow
+        o.errors[error_field] << opts[:message] unless allow
       end
     end
 
@@ -344,7 +367,7 @@ module Sequel
       case opts[:if]
       when Symbol then proc{send opts[:if]}
       when Proc then opts[:if]
-      when nil then proc{true}
+      when nil then DEFAULT_VALIDATION_IF_PROC
       else raise(::Sequel::Error, "invalid value for :if validation option")
       end
     end

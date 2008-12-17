@@ -8,6 +8,7 @@ module Sequel
     # Database class for PostgreSQL databases used with Sequel and the
     # ruby-sqlite3 driver.
     class Database < Sequel::Database
+      UNIX_EPOCH_TIME_FORMAT = /\A\d+\z/.freeze
       include ::Sequel::SQLite::DatabaseMethods
       
       set_adapter_scheme :sqlite
@@ -30,21 +31,19 @@ module Sequel
         db = ::SQLite3::Database.new(opts[:database])
         db.busy_timeout(opts.fetch(:timeout, 5000))
         db.type_translation = true
-        # fix for timestamp translation
-        db.translator.add_translator("timestamp") do |t, v|
-          v =~ /^\d+$/ ? Time.at(v.to_i) : Time.parse(v) 
-        end 
+        # Handle datetime's with Sequel.datetime_class
+        prok = proc do |t,v|
+          v = Time.at(v.to_i).iso8601 if UNIX_EPOCH_TIME_FORMAT.match(v)
+          v.to_sequel_time
+        end
+        db.translator.add_translator("timestamp", &prok)
+        db.translator.add_translator("datetime", &prok)
         db
       end
       
       # Return instance of Sequel::SQLite::Dataset with the given options.
       def dataset(opts = nil)
         SQLite::Dataset.new(self, opts)
-      end
-      
-      # Disconnect all connections from the database.
-      def disconnect
-        @pool.disconnect {|c| c.close}
       end
       
       # Run the given SQL with the given arguments and return the number of changed rows.
@@ -78,7 +77,7 @@ module Sequel
             conn.transaction{result = yield(conn)}
             result
           rescue ::Exception => e
-            raise (SQLite3::Exception === e ? Error.new(e.message) : e) unless Error::Rollback === e
+            transaction_error(e, SQLite3::Exception)
           end
         end
       end
@@ -92,7 +91,7 @@ module Sequel
           log_info(sql, opts[:arguments])
           synchronize(opts[:server]){|conn| yield conn}
         rescue SQLite3::Exception => e
-          raise Error::InvalidStatement, "#{sql}\r\n#{e.message}"
+          raise_error(e)
         end
       end
       
@@ -105,6 +104,11 @@ module Sequel
         # because otherwise each connection will get a separate database
         o[:max_connections] = 1 if @opts[:database] == ':memory:' || @opts[:database].blank?
         o
+      end
+
+      # Disconnect given connections from the database.
+      def disconnect_connection(c)
+        c.close
       end
     end
     
@@ -130,14 +134,6 @@ module Sequel
         end
         
         private
-        
-        # Work around for the default prepared statement and argument
-        # mapper code, which wants a hash that maps.  SQLite doesn't
-        # need to do this, but still requires a value for the argument
-        # in order for the substitution to work correctly.
-        def prepared_args_hash
-          true
-        end
         
         # SQLite uses a : before the name of the argument for named
         # arguments.
@@ -217,7 +213,7 @@ module Sequel
       # Prepare the given type of query with the given name and store
       # it in the database.  Note that a new native prepared statement is
       # created on each call to this prepared statement.
-      def prepare(type, name, values=nil)
+      def prepare(type, name=nil, values=nil)
         ps = to_prepared_statement(type, values)
         ps.extend(PreparedStatementMethods)
         db.prepared_statements[name] = ps if name

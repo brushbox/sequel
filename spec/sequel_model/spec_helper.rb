@@ -34,6 +34,7 @@ end
 
 class MockDatabase < Sequel::Database
   @@quote_identifiers = false
+  @@upcase_identifiers = false
   attr_reader :sqls
   
   def execute(sql, opts={})
@@ -43,6 +44,14 @@ class MockDatabase < Sequel::Database
 
   def reset
     @sqls = []
+  end
+
+  def schema(table_name, opts)
+    if table_name
+      [[:id, {:primary_key=>true}]]
+    else
+      {table_name=>[[:id, {:primary_key=>true}]]}
+    end
   end
 
   def transaction; yield; end

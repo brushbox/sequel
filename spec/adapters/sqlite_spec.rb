@@ -9,6 +9,9 @@ context "An SQLite database" do
   before do
     @db = SQLITE_DB
   end
+  after do
+    Sequel.datetime_class = Time
+  end
 
   if SQLITE_DB.auto_vacuum == :none
     specify "should support getting pragma values" do
@@ -128,12 +131,17 @@ context "An SQLite database" do
     @db[:items2].count.should == 2
   end
 
-  specify "should support timestamps" do
-    t1 = Time.at(Time.now.to_i) #normalize time
-    @db.create_table!(:time) {timestamp :t}
-    @db[:time] << {:t => t1}
-    x = @db[:time].first[:t]
-    [t1.iso8601, t1.to_s].should include(x.respond_to?(:iso8601) ? x.iso8601 : x.to_s)
+  specify "should support timestamps and datetimes and respect datetime_class" do
+    @db.create_table!(:time){timestamp :t; datetime :d}
+    t1 = Time.at(1)
+    @db[:time] << {:t => t1, :d => t1.to_i}
+    @db[:time] << {:t => t1.to_i, :d => t1}
+    @db[:time].map(:t).should == [t1, t1]
+    @db[:time].map(:d).should == [t1, t1]
+    t2 = t1.iso8601.to_datetime
+    Sequel.datetime_class = DateTime
+    @db[:time].map(:t).should == [t2, t2]
+    @db[:time].map(:d).should == [t2, t2]
   end
   
   specify "should support sequential primary keys" do
@@ -159,12 +167,12 @@ context "An SQLite database" do
 
   specify "should correctly parse the schema" do
     @db.create_table!(:time2) {timestamp :t}
-    @db.schema(:time2, :reload=>true).should == [[:t, {:type=>:datetime, :allow_null=>true, :max_chars=>nil, :default=>nil, :db_type=>"timestamp", :numeric_precision=>nil, :primary_key=>false}]]
+    @db.schema(:time2, :reload=>true).should == [[:t, {:type=>:datetime, :allow_null=>true, :default=>nil, :db_type=>"timestamp", :primary_key=>false}]]
   end
 
   specify "should get the schema all database tables if no table name is used" do
     @db.create_table!(:time2) {timestamp :t}
-    @db.schema(:time2, :reload=>true).should == @db.schema(nil, :reload=>true)[:time]
+    @db.schema(:time2, :reload=>true).should == @db.schema(nil, :reload=>true)[:time2]
   end
 end
 
@@ -237,6 +245,32 @@ context "An SQLite dataset" do
     proc{@d.literal(~:x.like(/a/))}.should raise_error(Sequel::Error)
     proc{@d.literal(:x.like(/a/i))}.should raise_error(Sequel::Error)
     proc{@d.literal(~:x.like(/a/i))}.should raise_error(Sequel::Error)
+  end
+end
+
+context "An SQLite dataset AS clause" do
+  specify "should use a string literal for :col___alias" do
+    SQLITE_DB.literal(:c___a).should == "c AS 'a'"
+  end
+
+  specify "should use a string literal for :table__col___alias" do
+    SQLITE_DB.literal(:t__c___a).should == "t.c AS 'a'"
+  end
+
+  specify "should use a string literal for :column.as(:alias)" do
+    SQLITE_DB.literal(:c.as(:a)).should == "c AS 'a'"
+  end
+
+  specify "should use a string literal in the SELECT clause" do
+    SQLITE_DB[:t].select(:c___a).sql.should == "SELECT c AS 'a' FROM t"
+  end
+
+  specify "should use a string literal in the FROM clause" do
+    SQLITE_DB[:t___a].sql.should == "SELECT * FROM t AS 'a'"
+  end
+
+  specify "should use a string literal in the JOIN clause" do
+    SQLITE_DB[:t].join_table(:natural, :j, nil, :a).sql.should == "SELECT * FROM t NATURAL JOIN j AS 'a'"
   end
 end
 
@@ -381,6 +415,33 @@ context "A SQLite database" do
     @db[:test2].first.should == {:name => 'mmm'}
   end
   
+  specify "should support drop_column operations in a transaction" do
+    @db.transaction{@db.drop_column :test2, :value}
+    @db[:test2].columns.should == [:name]
+    @db[:test2] << {:name => 'mmm'}
+    @db[:test2].first.should == {:name => 'mmm'}
+  end
+
+  specify "should keep column attributes when dropping a column" do
+    @db.create_table! :test3 do
+      primary_key :id
+      text :name
+      integer :value
+    end
+
+    # This lame set of additions and deletions are to test that the primary keys
+    # don't get messed up when we recreate the database.
+    @db[:test3] << { :name => "foo", :value => 1}
+    @db[:test3] << { :name => "foo", :value => 2}
+    @db[:test3] << { :name => "foo", :value => 3}
+    @db[:test3].filter(:id => 2).delete
+    
+    @db.drop_column :test3, :value
+
+    @db['PRAGMA table_info(?)', :test3][:id][:pk].to_i.should == 1
+    @db[:test3].select(:id).all.should == [{:id => 1}, {:id => 3}]
+  end
+
   specify "should not support rename_column operations" do
     proc {@db.rename_column :test2, :value, :zyx}.should raise_error(Sequel::Error)
   end
@@ -394,7 +455,8 @@ context "A SQLite database" do
     @db.add_index :test2, [:name, :value]
   end
   
-  specify "should not support drop_index" do
-    proc {@db.drop_index :test2, :value}.should raise_error(Sequel::Error)
+  specify "should support drop_index" do
+    @db.add_index :test2, :value, :unique => true
+    @db.drop_index :test2, :value
   end
 end  

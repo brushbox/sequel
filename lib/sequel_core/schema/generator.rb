@@ -2,15 +2,16 @@ module Sequel
   # The Schema module holds the schema generators and the SQL code relating
   # to SQL DDL (Data Definition Language).
   module Schema
-    # Schema::Generator is used to create tables.  It takes a Database
+    # Schema::Generator is an internal class that the user is not expected
+    # to instantiate directly.  Instances are created by Database#create_table.
+    # It is used to specify table creation parameters.  It takes a Database
     # object and a block of column/index/constraint specifications, and
-    # creates a table in the database based on the specifications.
+    # gives the Database a table description, which the database uses to
+    # create a table.
     #
     # Schema::Generator has some methods but also includes method_missing,
     # allowing users to specify column type as a method instead of using
     # the column method, which makes for a nicer DSL.
-    #
-    # See Database#create_table.
     class Generator
       # Set the database in which to create the table, and evaluate the block
       # in the context of this object.
@@ -48,6 +49,8 @@ module Sequel
       #   to whatever the database default is.
       # * :on_delete - Specify the behavior of this column when being deleted.
       #   See Schema::SQL#on_delete_clause for options.
+      # * :on_update - Specify the behavior of this column when being updated.
+      #   See Schema::SQL#on_delete_clause for options.
       # * :size - The size of the column, generally used with string
       #   columns to specify the maximum number of characters the column will hold.
       # * :unique - Mark the column is unique, generally has the same effect as
@@ -62,7 +65,8 @@ module Sequel
       # Adds a named constraint (or unnamed if name is nil) to the DDL,
       # with the given block or args.
       def constraint(name, *args, &block)
-        @columns << {:name => name, :type => :check, :check => block || args}
+        @columns << {:name => name, :type => :check, :check => block || args,
+                     :constraint_type => :check}
       end
       
       # Return the DDL created by the generator as a array of two elements,
@@ -85,6 +89,7 @@ module Sequel
         else
           raise(Error, "The seconds argument to foreign_key should be a Hash, Symbol, or nil")
         end
+        return composite_foreign_key(name, opts) if name.is_a?(Array)
         column(name, :integer, opts)
       end
       
@@ -114,10 +119,20 @@ module Sequel
         name ? column(name, type, opts) : super
       end
       
-      # Add a column with the given name and primary key options to the DDL. You
-      # can optionally provide a type argument and/or an options hash argument
-      # to change the primary key options. See column for available options.
+      # Add primary key information to the DDL. Takes between one and three
+      # arguments. The last one is an options hash as for Generator#column.
+      # The first one distinguishes two modes: an array of existing column
+      # names adds a composite primary key constraint. A single symbol adds a
+      # new column of that name and makes it the primary key. In that case the
+      # optional middle argument denotes the type.
+      # 
+      # Examples:
+      #   primary_key(:id)
+      #   primary_key(:zip_code, :null => false)
+      #   primary_key([:street_number, :house_number])
+      #   primary_key(:id, :string, :auto_increment => false)
       def primary_key(name, *args)
+        return composite_primary_key(name, *args) if name.is_a?(Array)
         @primary_key = @db.serial_primary_key_options.merge({:name => name})
         
         if opts = args.pop
@@ -129,7 +144,7 @@ module Sequel
         end
         @primary_key
       end
-      
+
       # The name of the primary key for this table, if it has a primary key.
       def primary_key_name
         @primary_key[:name] if @primary_key
@@ -140,14 +155,32 @@ module Sequel
         index(columns, opts.merge(:type => :spatial))
       end
 
-      # Add a unique index on the given columns to the DDL.
+      # Add a unique constraint on the given columns to the DDL.
       def unique(columns, opts = {})
-        index(columns, opts.merge(:unique => true))
+        @columns << {:type => :check, :constraint_type => :unique,
+                     :name => nil, :columns => Array(columns)}.merge(opts)
+      end
+
+      private
+
+      def composite_primary_key(columns, *args)
+        opts = args.pop || {}
+        @columns << {:type => :check, :constraint_type => :primary_key,
+                     :name => nil, :columns => columns}.merge(opts)
+      end
+
+      def composite_foreign_key(columns, opts)
+        @columns << {:type => :check, :constraint_type => :foreign_key,
+                     :name => nil, :columns => columns }.merge(opts)
       end
     end
   
-    # The Schema::AlterTableGenerator creates DDL operations on existing tables,
-    # such as adding/removing/modifying columns/indexes/constraints.
+    # Schema::AlterTableGenerator is an internal class that the user is not expected
+    # to instantiate directly.  Instances are created by Database#alter_table.
+    # It is used to specify table alteration parameters.  It takes a Database
+    # object and a block of operations to perform on the table, and
+    # gives the Database a table an array of operations, which the database uses to
+    # alter a table's description.
     class AlterTableGenerator
       # An array of DDL operations to perform
       attr_reader :operations
@@ -170,12 +203,25 @@ module Sequel
       # See Generator#constraint.
       def add_constraint(name, *args, &block)
         @operations << {:op => :add_constraint, :name => name, :type => :check, \
-          :check => block || args}
+          :constraint_type => :check, :check => block || args}
+      end
+
+      def add_unique_constraint(columns, opts = {})
+        @operations << {:op => :add_constraint, :type => :check,
+          :constraint_type => :unique, :columns => Array(columns)}.merge(opts)
       end
 
       # Add a foreign key with the given name and referencing the given table
       # to the DDL for the table.  See Generator#column for the available options.
+      #
+      # You can also pass an array of column names for creating composite foreign
+      # keys. In this case, it will assume the columns exists and will only add
+      # the constraint.
+      #
+      # NOTE: If you need to add a foreign key constraint to an existing column
+      # use the composite key syntax even if it is only one column.
       def add_foreign_key(name, table, opts = {})
+        return add_composite_foreign_key(name, table, opts) if name.is_a?(Array)
         add_column(name, :integer, {:table=>table}.merge(opts))
       end
       
@@ -194,6 +240,7 @@ module Sequel
       # Add a primary key to the DDL for the table.  See Generator#column
       # for the available options.
       def add_primary_key(name, opts = {})
+        return add_composite_primary_key(name, opts) if name.is_a?(Array)
         opts = @db.serial_primary_key_options.merge(opts)
         add_column(name, opts.delete(:type), opts)
       end
@@ -230,8 +277,26 @@ module Sequel
       end
 
       # Modify a column's type in the DDL for the table.
-      def set_column_type(name, type)
-        @operations << {:op => :set_column_type, :name => name, :type => type}
+      def set_column_type(name, type, opts={})
+        @operations << {:op => :set_column_type, :name => name, :type => type}.merge(opts)
+      end
+      
+      # Modify a column's NOT NULL constraint.
+      def set_column_allow_null(name, allow_null)
+        @operations << {:op => :set_column_null, :name => name, :null => allow_null}
+      end
+
+      private
+
+      def add_composite_primary_key(columns, opts)
+        @operations << {:op => :add_constraint, :type => :check,
+          :constraint_type => :primary_key, :columns => columns}.merge(opts)
+      end
+
+      def add_composite_foreign_key(columns, table, opts)
+        @operations << {:op => :add_constraint, :type => :check,
+          :constraint_type => :foreign_key, :columns => columns,
+          :table => table}.merge(opts)
       end
     end
   end

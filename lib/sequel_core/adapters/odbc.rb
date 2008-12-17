@@ -8,13 +8,20 @@ module Sequel
       GUARDED_DRV_NAME = /^\{.+\}$/.freeze
       DRV_NAME_GUARDS = '{%s}'.freeze
 
-      def connect(server)
-        opts = server_opts(server)
+      def initialize(opts)
+        super(opts)
         case opts[:db_type]
         when 'mssql'
           require 'sequel_core/adapters/shared/mssql'
           extend Sequel::MSSQL::DatabaseMethods
+        when 'progress'
+          require 'sequel_core/adapters/shared/progress'
+          extend Sequel::Progress::DatabaseMethods
         end
+      end
+
+      def connect(server)
+        opts = server_opts(server)
         if opts.include? :driver
           drv = ::ODBC::Driver.new
           drv.name = 'Sequel ODBC Driver130'
@@ -33,10 +40,6 @@ module Sequel
         conn
       end      
 
-      def disconnect
-        @pool.disconnect {|c| c.disconnect}
-      end
-    
       def dataset(opts = nil)
         ODBC::Dataset.new(self, opts)
       end
@@ -59,6 +62,35 @@ module Sequel
         synchronize(opts[:server]){|conn| conn.do(sql)}
       end
       alias_method :do, :execute_dui
+
+      # Support single level transactions on ODBC
+      def transaction(server=nil)
+        synchronize(server) do |conn|
+          return yield(conn) if @transactions.include?(Thread.current)
+          log_info(begin_transaction_sql)
+          conn.do(begin_transaction_sql)
+          begin
+            @transactions << Thread.current
+            yield(conn)
+          rescue ::Exception => e
+            log_info(rollback_transaction_sql)
+            conn.do(rollback_transaction_sql)
+            transaction_error(e)
+          ensure
+            unless e
+              log_info(commit_transaction_sql)
+              conn.do(commit_transaction_sql)
+            end
+            @transactions.delete(Thread.current)
+          end
+        end
+      end
+
+      private
+
+      def disconnect_connection(c)
+        c.disconnect
+      end
     end
     
     class Dataset < Sequel::Dataset

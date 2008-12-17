@@ -1,5 +1,6 @@
 require 'mysql'
 require 'sequel_core/adapters/shared/mysql'
+require 'sequel_core/dataset/stored_procedures'
 
 # Add methods to get columns, yield hashes with symbol keys, and do
 # type conversion.
@@ -85,6 +86,12 @@ module Sequel
       
       set_adapter_scheme :mysql
       
+      # Support stored procedures on MySQL
+      def call_sproc(name, opts={}, &block)
+        args = opts[:args] || [] 
+        execute("CALL #{name}(#{literal(args) unless args.empty?})", opts.merge(:sproc=>false), &block)
+      end
+      
       # Connect to the database.  In addition to the usual database options,
       # the following options have effect:
       #
@@ -125,19 +132,15 @@ module Sequel
         MySQL::Dataset.new(self, opts)
       end
       
-      # Closes all database connections.
-      def disconnect
-        @pool.disconnect {|c| c.close}
-      end
-      
       # Executes the given SQL using an available connection, yielding the
       # connection if the block is given.
       def execute(sql, opts={}, &block)
+        return call_sproc(sql, opts, &block) if opts[:sproc]
         return execute_prepared_statement(sql, opts, &block) if Symbol === sql
         begin
           synchronize(opts[:server]){|conn| _execute(conn, sql, opts, &block)}
         rescue Mysql::Error => e
-          raise Error.new(e.message)
+          raise_error(e)
         end
       end
       
@@ -146,28 +149,23 @@ module Sequel
         @server_version ||= (synchronize(server){|conn| conn.server_version if conn.respond_to?(:server_version)} || super)
       end
       
-      # Return an array of symbols specifying table names in the current database.
-      def tables(server=nil)
-        synchronize(server){|conn| conn.list_tables.map {|t| t.to_sym}}
-      end
-      
       # Support single level transactions on MySQL.
       def transaction(server=nil)
         synchronize(server) do |conn|
           return yield(conn) if @transactions.include?(Thread.current)
-          log_info(SQL_BEGIN)
-          conn.query(SQL_BEGIN)
+          log_info(begin_transaction_sql)
+          conn.query(begin_transaction_sql)
           begin
             @transactions << Thread.current
             yield(conn)
           rescue ::Exception => e
-            log_info(SQL_ROLLBACK)
-            conn.query(SQL_ROLLBACK)
-            raise (Mysql::Error === e ? Error.new(e.message) : e) unless Error::Rollback === e
+            log_info(rollback_transaction_sql)
+            conn.query(rollback_transaction_sql)
+            transaction_error(e, Mysql::Error)
           ensure
             unless e
-              log_info(SQL_COMMIT)
-              conn.query(SQL_COMMIT)
+              log_info(commit_transaction_sql)
+              conn.query(commit_transaction_sql)
             end
             @transactions.delete(Thread.current)
           end
@@ -183,11 +181,19 @@ module Sequel
         log_info(sql)
         conn.query(sql)
         if opts[:type] == :select
-          r = conn.use_result
-          begin
-            yield r
-          ensure
-            r.free
+          loop do
+            begin
+              r = conn.use_result
+            rescue Mysql::Error
+              nil
+            else
+              begin
+                yield r
+              ensure
+                r.free
+              end
+            end
+            break unless conn.respond_to?(:next_result) && conn.next_result
           end
         else
           yield conn if block_given?
@@ -203,6 +209,11 @@ module Sequel
       # the :database option.
       def database_name
         @opts[:database]
+      end
+      
+      # Closes given database connection.
+      def disconnect_connection(c)
+        c.close
       end
       
       # Executes a prepared statement on an available connection.  If the
@@ -236,10 +247,26 @@ module Sequel
     # Dataset class for MySQL datasets accessed via the native driver.
     class Dataset < Sequel::Dataset
       include Sequel::MySQL::DatasetMethods
+      include StoredProcedures
+      
+      # Methods to add to MySQL prepared statement calls without using a
+      # real database prepared statement and bound variables.
+      module CallableStatementMethods
+        # Extend given dataset with this module so subselects inside subselects in
+        # prepared statements work.
+        def subselect_sql(ds)
+          ps = ds.to_prepared_statement(:select)
+          ps.extend(CallableStatementMethods)
+          ps.prepared_args = prepared_args
+          ps.prepared_sql
+        end
+      end
       
       # Methods for MySQL prepared statements using the native driver.
       module PreparedStatementMethods
         include Sequel::Dataset::UnnumberedArgumentMapper
+        
+        private
         
         # Execute the prepared statement with the bind arguments instead of
         # the given SQL.
@@ -251,6 +278,34 @@ module Sequel
         def execute_dui(sql, opts={}, &block)
           super(prepared_statement_name, {:arguments=>bind_arguments}.merge(opts), &block)
         end
+      end
+      
+      # Methods for MySQL stored procedures using the native driver.
+      module StoredProcedureMethods
+        include Sequel::Dataset::StoredProcedureMethods
+        
+        private
+        
+        # Execute the database stored procedure with the stored arguments.
+        def execute(sql, opts={}, &block)
+          super(@sproc_name, {:args=>@sproc_args, :sproc=>true}.merge(opts), &block)
+        end
+        
+        # Same as execute, explicit due to intricacies of alias and super.
+        def execute_dui(sql, opts={}, &block)
+          super(@sproc_name, {:args=>@sproc_args, :sproc=>true}.merge(opts), &block)
+        end
+      end
+      
+      # MySQL is different in that it supports prepared statements but not bound
+      # variables outside of prepared statements.  The default implementation
+      # breaks the use of subselects in prepared statements, so extend the
+      # temporary prepared statement that this creates with a module that
+      # fixes it.
+      def call(type, bind_arguments={}, values=nil)
+        ps = to_prepared_statement(type, values)
+        ps.extend(CallableStatementMethods)
+        ps.call(bind_arguments)
       end
       
       # Delete rows matching this dataset
@@ -286,11 +341,14 @@ module Sequel
       
       # Store the given type of prepared statement in the associated database
       # with the given name.
-      def prepare(type, name, values=nil)
+      def prepare(type, name=nil, values=nil)
         ps = to_prepared_statement(type, values)
         ps.extend(PreparedStatementMethods)
-        ps.prepared_statement_name = name
-        db.prepared_statements[name] = ps
+        if name
+          ps.prepared_statement_name = name
+          db.prepared_statements[name] = ps
+        end
+        ps
       end
       
       # Replace (update or insert) the matching row.
@@ -313,6 +371,11 @@ module Sequel
       # Set the :type option to :dui if it hasn't been set.
       def execute_dui(sql, opts={}, &block)
         super(sql, {:type=>:dui}.merge(opts), &block)
+      end
+      
+      # Extend the dataset with the MySQL stored procedure methods.
+      def prepare_extend_sproc(ds)
+        ds.extend(StoredProcedureMethods)
       end
     end
   end

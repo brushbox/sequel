@@ -1,14 +1,12 @@
 module Sequel
   class Model
-    # Whether to lazily load the schema for future subclasses.  Unless turned
-    # off, checks the database for the table schema whenever a subclass is
-    # created
-    @@lazy_load_schema = false
-
     @allowed_columns = nil
+    @association_reflections = {}
     @dataset_methods = {}
+    @hooks = {}
     @primary_key = :id
     @raise_on_save_failure = true
+    @raise_on_typecast_failure = true
     @restrict_primary_key = true
     @restricted_columns = nil
     @sti_dataset = nil
@@ -21,6 +19,9 @@ module Sequel
     # (default: all columns).
     metaattr_reader :allowed_columns
 
+    # All association reflections defined for this model (default: none).
+    metaattr_reader :association_reflections
+
     # Hash of dataset methods to add to this class and subclasses when
     # set_dataset is called.
     metaattr_reader :dataset_methods
@@ -31,6 +32,10 @@ module Sequel
     # Whether to raise an error instead of returning nil on a failure
     # to save/create/save_changes/etc.
     metaattr_accessor :raise_on_save_failure
+
+    # Whether to raise an error when unable to typecast data for a column
+    # (default: true)
+    metaattr_accessor :raise_on_typecast_failure
 
     # Which columns should not be update in a call to set
     # (default: no columns).
@@ -62,7 +67,7 @@ module Sequel
        insert_multiple intersect interval invert_order join join_table last 
        left_outer_join limit map multi_insert naked order order_by order_more 
        paginate print query range reverse_order right_outer_join select 
-       select_all select_more set set_graph_aliases single_value size to_csv to_hash
+       select_all select_more server set set_graph_aliases single_value size to_csv to_hash
        transform union uniq unfiltered unordered update where'.map{|x| x.to_sym}
 
     # Instance variables that are inherited in subclasses
@@ -70,7 +75,8 @@ module Sequel
       :@cache_ttl=>nil, :@dataset_methods=>:dup, :@primary_key=>nil, 
       :@raise_on_save_failure=>nil, :@restricted_columns=>:dup, :@restrict_primary_key=>nil,
       :@sti_dataset=>nil, :@sti_key=>nil, :@strict_param_setting=>nil,
-      :@typecast_empty_string_to_nil=>nil, :@typecast_on_assignment=>nil}
+      :@typecast_empty_string_to_nil=>nil, :@typecast_on_assignment=>nil,
+      :@raise_on_typecast_failure=>nil, :@association_reflections=>:dup}
 
     # Returns the first record from the database matching the conditions.
     # If a hash is given, it is used as the conditions.  If another
@@ -206,12 +212,14 @@ module Sequel
           if sup_class == Model
             subclass.set_dataset(Model.db[subclass.implicit_table_name]) unless subclass.name.blank?
           elsif ds = sup_class.instance_variable_get(:@dataset)
-            subclass.set_dataset(sup_class.sti_key ? sup_class.sti_dataset.filter(sup_class.sti_key=>subclass.name.to_s) : ds.clone)
+            subclass.set_dataset(sup_class.sti_key ? sup_class.sti_dataset.filter(sup_class.sti_key=>subclass.name.to_s) : ds.clone, :inherited=>true)
           end
         rescue
           nil
         end
       end
+      hooks = subclass.instance_variable_set(:@hooks, {})
+      sup_class.instance_variable_get(:@hooks).each{|k,v| hooks[k] = v.dup}
     end
   
     # Returns the implicit table name for the model class.
@@ -219,14 +227,6 @@ module Sequel
       name.demodulize.underscore.pluralize.to_sym
     end
 
-    # Set whether to lazily load the schema for future model classes.
-    # When the schema is lazy loaded, the schema information is grabbed
-    # during the first instantiation of the class instead of
-    # when the class is created.
-    def self.lazy_load_schema=(value)
-      @@lazy_load_schema = value
-    end
-  
     # Initializes a model instance as an existing record. This constructor is
     # used by Sequel to initialize model instances when fetching records.
     # #load requires that values be a hash where all keys are symbols. It
@@ -284,6 +284,11 @@ module Sequel
       end
       @dataset.transform(@transform) if @dataset
     end
+
+    # Whether or not the given column is serialized for this model.
+    def self.serialized?(column)
+      @transform ? @transform.include?(column) : false
+    end
   
     # Set the columns to allow in new/set/update.  Using this means that
     # any columns not listed here will not be modified.  If you have any virtual
@@ -306,9 +311,9 @@ module Sequel
     # and adds a destroy method to it.  It also extends the dataset with
     # the Associations::EagerLoading methods, and assigns a transform to it
     # if there is one associated with the model. Finally, it attempts to 
-    # determine the database schema based on the given/created dataset unless
-    # lazy_load_schema is set.
-    def self.set_dataset(ds)
+    # determine the database schema based on the given/created dataset.
+    def self.set_dataset(ds, opts={})
+      inherited = opts[:inherited]
       @dataset = case ds
       when Symbol
         db[ds]
@@ -319,13 +324,15 @@ module Sequel
         raise(Error, "Model.set_dataset takes a Symbol or a Sequel::Dataset")
       end
       @dataset.set_model(self)
-      @dataset.extend(DatasetMethods)
-      @dataset.extend(Associations::EagerLoading)
       @dataset.transform(@transform) if @transform
-      @dataset_methods.each{|meth, block| @dataset.meta_def(meth, &block)} if @dataset_methods
-      unless @@lazy_load_schema
-        (@db_schema = get_db_schema) rescue nil
+      if inherited
+        @columns = @dataset.columns rescue nil
+      else
+        @dataset.extend(DatasetMethods)
+        @dataset.extend(Associations::EagerLoading)
+        @dataset_methods.each{|meth, block| @dataset.meta_def(meth, &block)} if @dataset_methods
       end
+      @db_schema = (inherited ? superclass.db_schema : get_db_schema) rescue nil
       self
     end
     metaalias :dataset=, :set_dataset
@@ -428,12 +435,14 @@ module Sequel
       columns.each do |column|
         im = instance_methods.collect{|x| x.to_s}
         meth = "#{column}="
-         define_method(column){self[column]} unless im.include?(column.to_s)
-        unless im.include?(meth)
-          define_method(meth) do |*v|
-            len = v.length
-            raise(ArgumentError, "wrong number of arguments (#{len} for 1)") unless len == 1
-            self[column] = v.first 
+        overridable_methods_module.module_eval do
+          define_method(column){self[column]} unless im.include?(column.to_s)
+          unless im.include?(meth)
+            define_method(meth) do |*v|
+              len = v.length
+              raise(ArgumentError, "wrong number of arguments (#{len} for 1)") unless len == 1
+              self[column] = v.first 
+            end
           end
         end
       end
@@ -464,6 +473,9 @@ module Sequel
           # returned by the schema.
           cols = schema_array.collect{|k,v| k}
           set_columns(cols)
+          # Set the primary key(s) based on the schema information
+          pks = schema_array.collect{|k,v| k if v[:primary_key]}.compact
+          pks.length > 0 ? set_primary_key(*pks) : no_primary_key
           # Also set the columns for the dataset, so the dataset
           # doesn't have to do a query to get them.
           dataset.instance_variable_set(:@columns, cols)
@@ -477,6 +489,13 @@ module Sequel
       schema_hash
     end
 
+    # Module that the class includes that holds methods the class adds for column accessors and
+    # associations so that the methods can be overridden with super
+    def self.overridable_methods_module
+      include(@overridable_methods_module = Module.new) unless @overridable_methods_module
+      @overridable_methods_module
+    end
+
     # Set the columns for this model, reset the str_columns,
     # and create accessor methods for each column.
     def self.set_columns(new_columns) # :nodoc:
@@ -486,6 +505,6 @@ module Sequel
       @columns
     end
 
-    private_class_method :def_column_accessor, :get_db_schema, :set_columns
+    private_class_method :def_column_accessor, :get_db_schema, :overridable_methods_module, :set_columns
   end
 end

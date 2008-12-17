@@ -46,7 +46,7 @@ end
 describe Sequel::Model, "many_to_one" do
   before do
     MODEL_DB.reset
-
+    
     @c2 = Class.new(Sequel::Model(:nodes)) do
       unrestrict_primary_key
       columns :id, :parent_id, :par_parent_id, :blah
@@ -105,6 +105,12 @@ describe Sequel::Model, "many_to_one" do
     MODEL_DB.sqls.should == ["SELECT * FROM nodes WHERE (nodes.id = 567) LIMIT 1"]
   end
 
+  it "should use :primary_key option if given" do
+    @c2.many_to_one :parent, :class => @c2, :key => :blah, :primary_key => :pk
+    @c2.new(:id => 1, :blah => 567).parent
+    MODEL_DB.sqls.should == ["SELECT * FROM nodes WHERE (nodes.pk = 567) LIMIT 1"]
+  end
+
   it "should use :select option if given" do
     @c2.many_to_one :parent, :class => @c2, :key => :blah, :select=>[:id, :name]
     @c2.new(:id => 1, :blah => 567).parent
@@ -155,6 +161,21 @@ describe Sequel::Model, "many_to_one" do
     e = @c2.new(:id => 6677)
     d.parent = e
     d.values.should == {:id => 1, :parent_id => 6677}
+  end
+  
+  it "should have the setter method respect the :primary_key option" do
+    @c2.many_to_one :parent, :class => @c2, :primary_key=>:blah
+
+    d = @c2.new(:id => 1)
+    d.parent = @c2.new(:id => 4321, :blah=>444)
+    d.values.should == {:id => 1, :parent_id => 444}
+
+    d.parent = nil
+    d.values.should == {:id => 1, :parent_id => nil}
+
+    e = @c2.new(:id => 6677, :blah=>8)
+    d.parent = e
+    d.values.should == {:id => 1, :parent_id => 8}
   end
   
   it "should not persist changes until saved" do
@@ -287,6 +308,14 @@ describe Sequel::Model, "many_to_one" do
     @c2.many_to_one :parent, :class => @c2, :read_only=>true
     @c2.instance_methods.collect{|x| x.to_s}.should(include('parent'))
     @c2.instance_methods.collect{|x| x.to_s}.should_not(include('parent='))
+  end
+
+  it "should not add associations methods directly to class" do
+    @c2.many_to_one :parent, :class => @c2
+    @c2.instance_methods.collect{|x| x.to_s}.should(include('parent'))
+    @c2.instance_methods.collect{|x| x.to_s}.should(include('parent='))
+    @c2.instance_methods(false).collect{|x| x.to_s}.should_not(include('parent'))
+    @c2.instance_methods(false).collect{|x| x.to_s}.should_not(include('parent='))
   end
 
   it "should raise an error if trying to set a model object that doesn't have a valid primary key" do
@@ -520,6 +549,18 @@ describe Sequel::Model, "one_to_many" do
     MODEL_DB.sqls.should == ['UPDATE attributes SET node_id = NULL WHERE (id = 2345)']
   end
   
+  it "should have add_ method respect the :primary_key option" do
+    @c2.one_to_many :attributes, :class => @c1, :primary_key=>:xxx
+    
+    n = @c2.new(:id => 1234, :xxx=>5)
+    a = @c1.new(:id => 2345)
+    a.save!
+    MODEL_DB.reset
+    a.should == n.add_attribute(a)
+    MODEL_DB.sqls.should == ['UPDATE attributes SET node_id = 5 WHERE (id = 2345)']
+  end
+
+  
   it "should raise an error in add_ and remove_ if the passed object returns false to save (is not valid)" do
     @c2.one_to_many :attributes, :class => @c1
     n = @c2.new(:id => 1234)
@@ -540,6 +581,12 @@ describe Sequel::Model, "one_to_many" do
     proc{a.remove_all_attributes}.should raise_error(Sequel::Error)
   end
   
+  it "should use :primary_key option if given" do
+    @c1.one_to_many :nodes, :class => @c2, :primary_key => :node_id, :key=>:id
+    n = @c1.load(:id => 1234, :node_id=>4321)
+    n.nodes_dataset.sql.should == "SELECT * FROM nodes WHERE (nodes.id = 4321)"
+  end
+
   it "should support a select option" do
     @c2.one_to_many :attributes, :class => @c1, :select => [:id, :name]
 
@@ -727,6 +774,22 @@ describe Sequel::Model, "one_to_many" do
     im.should_not(include('remove_all_attributes'))
   end
 
+  it "should not add associations methods directly to class" do
+    @c2.one_to_many :attributes, :class => @c1
+    im = @c2.instance_methods.collect{|x| x.to_s}
+    im.should(include('attributes'))
+    im.should(include('attributes_dataset'))
+    im.should(include('add_attribute'))
+    im.should(include('remove_attribute'))
+    im.should(include('remove_all_attributes'))
+    im2 = @c2.instance_methods(false).collect{|x| x.to_s}
+    im2.should_not(include('attributes'))
+    im2.should_not(include('attributes_dataset'))
+    im2.should_not(include('add_attribute'))
+    im2.should_not(include('remove_attribute'))
+    im2.should_not(include('remove_all_attributes'))
+  end
+
   it "should have has_many alias" do
     @c2.has_many :attributes, :class => @c1
     
@@ -775,6 +838,12 @@ describe Sequel::Model, "one_to_many" do
     @c2.one_to_many :attributes, :class => @c1
     @c2.new(:id => 1234).remove_all_attributes
     MODEL_DB.sqls.first.should == 'UPDATE attributes SET node_id = NULL WHERE (node_id = 1234)'
+  end
+
+  it "should have the remove_all_ method respect the :primary_key option" do
+    @c2.one_to_many :attributes, :class => @c1, :primary_key=>:xxx
+    @c2.new(:id => 1234, :xxx=>5).remove_all_attributes
+    MODEL_DB.sqls.first.should == 'UPDATE attributes SET node_id = NULL WHERE (node_id = 5)'
   end
 
   it "remove_all should set the cached instance variable to []" do
@@ -828,7 +897,7 @@ describe Sequel::Model, "one_to_many" do
     att.values.should == {}
   end
 
-  it "should not add a getter method if the :one_to_one option is true and :read_only option is true" do
+  it "should not add a setter method if the :one_to_one option is true and :read_only option is true" do
     @c2.one_to_many :attributes, :class => @c1, :one_to_one=>true, :read_only=>true
     im = @c2.instance_methods.collect{|x| x.to_s}
     im.should(include('attribute'))
@@ -861,6 +930,25 @@ describe Sequel::Model, "one_to_many" do
     MODEL_DB.sqls.last.should == 'UPDATE attributes SET node_id = NULL WHERE ((node_id = 1234) AND (id != 3))'
   end
 
+  it "should have the setter method for the :one_to_one option respect the :primary_key option" do
+    @c2.one_to_many :attributes, :class => @c1, :one_to_one=>true, :primary_key=>:xxx
+    attrib = @c1.new(:id=>3)
+    d = @c1.dataset
+    def d.fetch_rows(s); yield({:id=>3}) end
+    @c2.new(:id => 1234, :xxx=>5).attribute = attrib
+    ['INSERT INTO attributes (node_id, id) VALUES (5, 3)',
+      'INSERT INTO attributes (id, node_id) VALUES (3, 5)'].should(include(MODEL_DB.sqls.first))
+    MODEL_DB.sqls.last.should == 'UPDATE attributes SET node_id = NULL WHERE ((node_id = 5) AND (id != 3))'
+    MODEL_DB.sqls.length.should == 2
+    @c2.new(:id => 321, :xxx=>5).attribute.should == attrib
+    MODEL_DB.sqls.clear
+    attrib = @c1.load(:id=>3)
+    @c2.new(:id => 621, :xxx=>5).attribute = attrib
+    MODEL_DB.sqls.length.should == 2
+    MODEL_DB.sqls.first.should =~ /UPDATE attributes SET (node_id = 5, id = 3|id = 3, node_id = 5) WHERE \(id = 3\)/
+    MODEL_DB.sqls.last.should == 'UPDATE attributes SET node_id = NULL WHERE ((node_id = 5) AND (id != 3))'
+  end
+
   it "should raise an error if the one_to_one getter would be the same as the association name" do
     proc{@c2.one_to_many :song, :class => @c1, :one_to_one=>true}.should raise_error(Sequel::Error)
   end
@@ -873,7 +961,7 @@ describe Sequel::Model, "one_to_many" do
 
   it "should make non getter and setter methods private if :one_to_one option is used" do 
     @c2.one_to_many :attributes, :class => @c1, :one_to_one=>true do |ds| end
-    meths = @c2.private_instance_methods(false).collect{|x| x.to_s}
+    meths = @c2.private_instance_methods.collect{|x| x.to_s}
     meths.should(include("attributes"))
     meths.should(include("add_attribute"))
     meths.should(include("attributes_dataset"))
@@ -994,6 +1082,7 @@ describe Sequel::Model, "many_to_many" do
 
     @c1 = Class.new(Sequel::Model(:attributes)) do
       unrestrict_primary_key
+      attr_accessor :yyy
       def self.name; 'Attribute'; end
       def self.to_s; 'Attribute'; end
       columns :id
@@ -1079,6 +1168,11 @@ describe Sequel::Model, "many_to_many" do
     a = n.attributes_dataset
     a.should be_a_kind_of(Sequel::Dataset)
     a.sql.should == 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON ((attributes_nodes.attribute_id = attributes.id) AND (attributes_nodes.node_id = 1234)) ORDER BY blah1, blah2'
+  end
+  
+  it "should support :left_primary_key and :right_primary_key options" do
+    @c2.many_to_many :attributes, :class => @c1, :left_primary_key=>:xxx, :right_primary_key=>:yyy
+    @c2.new(:id => 1234, :xxx=>5).attributes_dataset.sql.should == 'SELECT attributes.* FROM attributes INNER JOIN attributes_nodes ON ((attributes_nodes.attribute_id = attributes.yyy) AND (attributes_nodes.node_id = 5))'
   end
   
   it "should support a select option" do
@@ -1180,6 +1274,26 @@ describe Sequel::Model, "many_to_many" do
     a = @c1.new(:id => 2345)
     a.should == n.remove_attribute(a)
     MODEL_DB.sqls.first.should == 'DELETE FROM attributes_nodes WHERE ((node_id = 1234) AND (attribute_id = 2345))'
+  end
+
+  it "should have the add_ method respect the :left_primary_key and :right_primary_key options" do
+    @c2.many_to_many :attributes, :class => @c1, :left_primary_key=>:xxx, :right_primary_key=>:yyy
+    
+    n = @c2.new(:id => 1234, :xxx=>5)
+    a = @c1.new(:id => 2345, :yyy=>8)
+    a.should == n.add_attribute(a)
+    ['INSERT INTO attributes_nodes (node_id, attribute_id) VALUES (5, 8)',
+     'INSERT INTO attributes_nodes (attribute_id, node_id) VALUES (8, 5)'
+    ].should(include(MODEL_DB.sqls.first))
+  end
+
+  it "should have the remove_ method respect the :left_primary_key and :right_primary_key options" do
+    @c2.many_to_many :attributes, :class => @c1, :left_primary_key=>:xxx, :right_primary_key=>:yyy
+    
+    n = @c2.new(:id => 1234, :xxx=>5)
+    a = @c1.new(:id => 2345, :yyy=>8)
+    a.should == n.remove_attribute(a)
+    MODEL_DB.sqls.first.should == 'DELETE FROM attributes_nodes WHERE ((node_id = 5) AND (attribute_id = 8))'
   end
 
   it "should raise an error if the model object doesn't have a valid primary key" do
@@ -1300,6 +1414,22 @@ describe Sequel::Model, "many_to_many" do
     im.should_not(include('remove_all_attributes'))
   end
 
+  it "should not add associations methods directly to class" do
+    @c2.many_to_many :attributes, :class => @c1
+    im = @c2.instance_methods.collect{|x| x.to_s}
+    im.should(include('attributes'))
+    im.should(include('attributes_dataset'))
+    im.should(include('add_attribute'))
+    im.should(include('remove_attribute'))
+    im.should(include('remove_all_attributes'))
+    im2 = @c2.instance_methods(false).collect{|x| x.to_s}
+    im2.should_not(include('attributes'))
+    im2.should_not(include('attributes_dataset'))
+    im2.should_not(include('add_attribute'))
+    im2.should_not(include('remove_attribute'))
+    im2.should_not(include('remove_all_attributes'))
+  end
+
   it "should have has_and_belongs_to_many alias" do
     @c2.has_and_belongs_to_many :attributes, :class => @c1 
 
@@ -1313,6 +1443,12 @@ describe Sequel::Model, "many_to_many" do
     @c2.many_to_many :attributes, :class => @c1
     @c2.new(:id => 1234).remove_all_attributes
     MODEL_DB.sqls.first.should == 'DELETE FROM attributes_nodes WHERE (node_id = 1234)'
+  end
+
+  it "should have the remove_all_ method respect the :left_primary_key option" do
+    @c2.many_to_many :attributes, :class => @c1, :left_primary_key=>:xxx
+    @c2.new(:id => 1234, :xxx=>5).remove_all_attributes
+    MODEL_DB.sqls.first.should == 'DELETE FROM attributes_nodes WHERE (node_id = 5)'
   end
 
   it "remove_all should set the cached instance variable to []" do
@@ -1463,6 +1599,20 @@ describe Sequel::Model, "many_to_many" do
     p.remove_attribute(c).should == nil
     p.attributes.should == [c]
   end
+
+  it "should support a :uniq option that removes duplicates from the association" do
+    h = []
+    @c2.many_to_many :attributes, :class => @c1, :uniq=>true
+    @c1.class_eval do
+      def @dataset.fetch_rows(sql)
+        yield({:id=>20})
+        yield({:id=>30})
+        yield({:id=>20})
+        yield({:id=>30})
+      end
+    end
+    @c2.load(:id=>10, :parent_id=>20).attributes.should == [@c1.load(:id=>20), @c1.load(:id=>30)]
+  end
 end
 
 describe Sequel::Model, " association reflection methods" do
@@ -1513,5 +1663,16 @@ describe Sequel::Model, " association reflection methods" do
     @c1.associations.should == [:parent]
     @c1.associate :one_to_many, :children, :class => @c1
     @c1.associations.sort_by{|x|x.to_s}.should == [:children, :parent]
+  end
+
+  it "association reflections should be copied upon subclasing" do
+    @c1.associate :many_to_one, :parent, :class => @c1
+    c = Class.new(@c1)
+    @c1.associations.should == [:parent]
+    c.associations.should == [:parent]
+    c.associate :many_to_one, :parent2, :class => @c1
+    @c1.associations.should == [:parent]
+    c.associations.sort_by{|x| x.to_s}.should == [:parent, :parent2]
+    c.instance_methods.map{|x| x.to_s}.should include('parent')
   end
 end

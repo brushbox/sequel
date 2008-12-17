@@ -17,6 +17,19 @@ describe "Model#save" do
     MODEL_DB.sqls.first.should == "INSERT INTO items (x) VALUES (1)"
   end
 
+  it "should use dataset's insert_select method if present" do
+    ds = @c.dataset = @c.dataset.clone
+    def ds.insert_select(hash)
+      execute("INSERT INTO items (y) VALUES (2)")
+      {:y=>2}
+    end
+    o = @c.new(:x => 1)
+    o.save
+    
+    o.values.should == {:y=>2}
+    MODEL_DB.sqls.first.should == "INSERT INTO items (y) VALUES (2)"
+  end
+
   it "should update a record for an existing model instance" do
     o = @c.load(:id => 3, :x => 1)
     o.save
@@ -104,6 +117,40 @@ describe "Model#save_changes" do
     o.save_changes
     MODEL_DB.sqls.should == ["UPDATE items SET y = 4 WHERE (id = 3)"]
   end
+
+  it "should update columns changed in a before_update hook" do
+    o = @c.load(:id => 3, :x => 1, :y => nil)
+    @c.before_update{self.x += 1}
+    o.save_changes
+    MODEL_DB.sqls.should == []
+    o.x = 2
+    o.save_changes
+    MODEL_DB.sqls.should == ["UPDATE items SET x = 3 WHERE (id = 3)"]
+    MODEL_DB.reset
+    o.save_changes
+    MODEL_DB.sqls.should == []
+    o.x = 4
+    o.save_changes
+    MODEL_DB.sqls.should == ["UPDATE items SET x = 5 WHERE (id = 3)"]
+    MODEL_DB.reset
+  end
+
+  it "should update columns changed in a before_save hook" do
+    o = @c.load(:id => 3, :x => 1, :y => nil)
+    @c.before_save{self.x += 1}
+    o.save_changes
+    MODEL_DB.sqls.should == []
+    o.x = 2
+    o.save_changes
+    MODEL_DB.sqls.should == ["UPDATE items SET x = 3 WHERE (id = 3)"]
+    MODEL_DB.reset
+    o.save_changes
+    MODEL_DB.sqls.should == []
+    o.x = 4
+    o.save_changes
+    MODEL_DB.sqls.should == ["UPDATE items SET x = 5 WHERE (id = 3)"]
+    MODEL_DB.reset
+  end
 end
 
 describe "Model#update_values" do
@@ -180,6 +227,7 @@ describe "Model#new?" do
 
     @c = Class.new(Sequel::Model(:items)) do
       unrestrict_primary_key
+      columns :x
     end
   end
   
@@ -393,6 +441,12 @@ describe Sequel::Model, "#set" do
     returned_value = @o1.set_with_params(:x => 1, :z => 2)
     returned_value.should == @o1
     MODEL_DB.sqls.should == []
+  end
+
+  it "should assume it is a column if no column information is present and the key is a symbol" do
+    @c.instance_variable_set(:@columns, nil)
+    o = @c.new.set(:x123=>1)
+    o[:x123].should == 1
   end
 end
 
@@ -696,11 +750,6 @@ describe Sequel::Model, "#initialize" do
     m.values.should == {}
   end
   
-  specify "should accept nil values" do
-    m = @c.new(nil)
-    m.values.should == {}
-  end
-  
   specify "should accept a block to execute" do
     m = @c.new {|o| o[:id] = 1234}
     m.id.should == 1234
@@ -820,6 +869,14 @@ describe Sequel::Model, "typecasting" do
     m.x.should == '1'
   end
 
+  specify "should not convert if serializing the field" do
+    @c.serialize :x
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:string}})
+    m = @c.new
+    m.x =[1, 2]
+    m.x.should == [1, 2]
+  end
+
   specify "should convert to integer for an integer field" do
     @c.instance_variable_set(:@db_schema, {:x=>{:type=>:integer}})
     m = @c.new
@@ -876,9 +933,28 @@ describe Sequel::Model, "typecasting" do
     m.x.should == nil
   end
 
+  specify "should not raise when typecasting nil to NOT NULL column but raise_on_typecast_failure is off" do
+    @c.raise_on_typecast_failure = false
+    @c.typecast_on_assignment = true
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:integer,:allow_null=>false}})
+    m = @c.new
+    m.x = ''
+    m.x.should == nil
+    m.x = nil
+    m.x.should == nil
+  end
+
   specify "should raise an error if invalid data is used in an integer field" do
     @c.instance_variable_set(:@db_schema, {:x=>{:type=>:integer}})
     proc{@c.new.x = 'a'}.should raise_error
+  end
+
+  specify "should assign value if raise_on_typecast_failure is off and assigning invalid integer" do
+    @c.raise_on_typecast_failure = false
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:integer}})
+    model = @c.new
+    model.x = '1d'
+    model.x.should == '1d'
   end
 
   specify "should convert to float for a float field" do
@@ -895,6 +971,14 @@ describe Sequel::Model, "typecasting" do
   specify "should raise an error if invalid data is used in an float field" do
     @c.instance_variable_set(:@db_schema, {:x=>{:type=>:float}})
     proc{@c.new.x = 'a'}.should raise_error
+  end
+
+  specify "should assign value if raise_on_typecast_failure is off and assigning invalid float" do
+    @c.raise_on_typecast_failure = false
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:float}})
+    model = @c.new
+    model.x = '1d'
+    model.x.should == '1d'
   end
 
   specify "should convert to BigDecimal for a decimal field" do
@@ -914,6 +998,15 @@ describe Sequel::Model, "typecasting" do
   specify "should raise an error if invalid data is used in an decimal field" do
     @c.instance_variable_set(:@db_schema, {:x=>{:type=>:decimal}})
     proc{@c.new.x = Date.today}.should raise_error
+  end
+
+  specify "should assign value if raise_on_typecast_failure is off and assigning invalid decimal" do
+    @c.raise_on_typecast_failure = false
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:decimal}})
+    model = @c.new
+    time = Time.now
+    model.x = time
+    model.x.should == time
   end
 
   specify "should convert to string for a string field" do
@@ -984,6 +1077,14 @@ describe Sequel::Model, "typecasting" do
     proc{@c.new.x = 100}.should raise_error
   end
 
+  specify "should assign value if raise_on_typecast_failure is off and assigning invalid date" do
+    @c.raise_on_typecast_failure = false
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:date}})
+    model = @c.new
+    model.x = 4
+    model.x.should == 4
+  end
+
   specify "should convert to time for a time field" do
     @c.instance_variable_set(:@db_schema, {:x=>{:type=>:time}})
     m = @c.new
@@ -1001,6 +1102,14 @@ describe Sequel::Model, "typecasting" do
     proc{@c.new.x = 'a'}.should_not raise_error # Valid Time
     proc{@c.new.x = '2008-10-21'.to_date}.should raise_error
     proc{@c.new.x = '2008-10-21'.to_datetime}.should raise_error
+  end
+
+  specify "should assign value if raise_on_typecast_failure is off and assigning invalid time" do
+    @c.raise_on_typecast_failure = false
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:time}})
+    model = @c.new
+    model.x = '0000'
+    model.x.should == '0000'
   end
 
   specify "should convert to the Sequel.datetime_class for a datetime field" do
@@ -1030,10 +1139,24 @@ describe Sequel::Model, "typecasting" do
 
   specify "should raise an error if invalid data is used in a datetime field" do
     @c.instance_variable_set(:@db_schema, {:x=>{:type=>:datetime}})
-    proc{@c.new.x = '0000'}.should raise_error
+    proc{@c.new.x = '0000'}.should raise_error(Sequel::Error::InvalidValue)
     proc{@c.new.x = 'a'}.should_not raise_error # Valid Time
     Sequel.datetime_class = DateTime
     proc{@c.new.x = '0000'}.should raise_error
     proc{@c.new.x = 'a'}.should raise_error
+  end
+
+  specify "should assign value if raise_on_typecast_failure is off and assigning invalid datetime" do
+    @c.raise_on_typecast_failure = false
+    @c.instance_variable_set(:@db_schema, {:x=>{:type=>:datetime}})
+    model = @c.new
+    model.x = '0000'
+    model.x.should == '0000'
+    Sequel.datetime_class = DateTime
+    model = @c.new
+    model.x = '0000'
+    model.x.should == '0000'
+    model.x = 'a'
+    model.x.should == 'a'
   end
 end

@@ -21,7 +21,7 @@ module Sequel
             rows = stmt.send(method, sql)
             yield(rows) if block_given?
           rescue NativeException => e
-            raise Error, e.message
+            raise_error(e)
           ensure
             stmt.close
           end
@@ -30,15 +30,10 @@ module Sequel
         private
         
         # JDBC specific method of getting specific values from a result set.
-        def result_set_values(r, *vals)
-          return if r.nil?
-          r.next
-          return if r.getRow == 0
-          case vals.length
-          when 1
-            r.getString(vals.first+1)
-          else
-            vals.collect{|col| r.getString(col+1)}
+        def single_value(r)
+          unless r.nil?
+            r.next
+            r.getString(1) unless r.getRow == 0
           end
         end
       end
@@ -47,6 +42,15 @@ module Sequel
       # JDBC.
       module DatabaseMethods
         include Sequel::Postgres::DatabaseMethods
+        
+        # Add the primary_keys and primary_key_sequences instance variables,
+        # so we can get the correct return values for inserted rows.
+        def self.extended(db)
+          db.instance_eval do
+            @primary_keys = {}
+            @primary_key_sequences = {}
+          end
+        end
         
         # Return instance of Sequel::JDBC::Postgres::Dataset with the given opts.
         def dataset(opts=nil)
@@ -65,6 +69,8 @@ module Sequel
         def setup_connection(conn)
           conn = super(conn)
           conn.extend(Sequel::JDBC::Postgres::AdapterMethods)
+          conn.db = self
+          conn.apply_connection_settings
           conn
         end
         
@@ -77,6 +83,13 @@ module Sequel
       # Dataset subclass used for datasets that connect to PostgreSQL via JDBC.
       class Dataset < JDBC::Dataset
         include Sequel::Postgres::DatasetMethods
+
+        # Add the shared PostgreSQL prepared statement methods
+        def prepare(*args)
+          ps = super
+          ps.extend(::Sequel::Postgres::DatasetMethods::PreparedStatementMethods)
+          ps
+        end
         
         # Convert Java::JavaSql::Timestamps correctly, and handle SQL::Blobs
         # correctly.

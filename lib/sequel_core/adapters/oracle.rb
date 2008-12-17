@@ -1,9 +1,17 @@
 require 'oci8'
+require 'sequel_core/adapters/shared/oracle'
 
 module Sequel
   module Oracle
     class Database < Sequel::Database
+      include DatabaseMethods
       set_adapter_scheme :oracle
+
+      # ORA-00028: your session has been killed
+      # ORA-01012: not logged on
+      # ORA-03113: end-of-file on communication channel
+      # ORA-03114: not connected to ORACLE
+      CONNECTION_ERROR_CODES = [ 28, 1012, 3113, 3114 ]      
       
       def connect(server)
         opts = server_opts(server)
@@ -19,10 +27,6 @@ module Sequel
         conn
       end
       
-      def disconnect
-        @pool.disconnect {|c| c.logoff}
-      end
-    
       def dataset(opts = nil)
         Oracle::Dataset.new(self, opts)
       end
@@ -30,23 +34,21 @@ module Sequel
       def execute(sql, opts={})
         log_info(sql)
         synchronize(opts[:server]) do |conn|
-          r = conn.exec(sql)
-          yield(r) if block_given?
-          r
+          begin
+            r = conn.exec(sql)
+            yield(r) if block_given?
+            r
+          rescue OCIException => e
+            if CONNECTION_ERROR_CODES.include?(e.code)  
+              raise(Sequel::DatabaseDisconnectError)              
+            else
+              raise
+            end
+          end
         end
       end
       alias_method :do, :execute
       
-      def tables
-        from(:tab).select(:tname).filter(:tabtype => 'TABLE').map do |r|
-          r[:tname].downcase.to_sym
-        end
-      end
-
-      def table_exists?(name)
-        from(:tab).filter(:tname => name.to_s.upcase, :tabtype => 'TABLE').count > 0
-      end
-
       def transaction(server=nil)
         synchronize(server) do |conn|
           return yield(conn) if @transactions.include?(Thread.current)
@@ -65,9 +67,17 @@ module Sequel
           end
         end
       end
+
+      private
+
+      def disconnect_connection(c)
+        c.logoff
+      end
     end
     
     class Dataset < Sequel::Dataset
+      include DatasetMethods
+
       def literal(v)
         case v
         when OraDate
@@ -92,73 +102,6 @@ module Sequel
         end
         self
       end
-
-      def empty?
-        db[:dual].where(exists).get(1) == nil
-      end
-
-      # Formats a SELECT statement using the given options and the dataset
-      # options.
-      def select_sql(opts = nil)
-        opts = opts ? @opts.merge(opts) : @opts
-
-        if sql = opts[:sql]
-          return sql
-        end
-
-        columns = opts[:select]
-        select_columns = columns ? column_list(columns) : WILDCARD
-        sql = opts[:distinct] ? \
-        "SELECT DISTINCT #{select_columns}" : \
-        "SELECT #{select_columns}"
-        
-        if opts[:from]
-          sql << " FROM #{source_list(opts[:from])}"
-        end
-        
-        if join = opts[:join]
-          join.each{|j| sql << literal(j)}
-        end
-
-        if where = opts[:where]
-          sql << " WHERE #{literal(where)}"
-        end
-
-        if group = opts[:group]
-          sql << " GROUP BY #{expression_list(group)}"
-        end
-
-        if having = opts[:having]
-          sql << " HAVING #{literal(having)}"
-        end
-
-        if union = opts[:union]
-          sql << (opts[:union_all] ? \
-            " UNION ALL #{union.sql}" : " UNION #{union.sql}")
-        elsif intersect = opts[:intersect]
-          sql << (opts[:intersect_all] ? \
-            " INTERSECT ALL #{intersect.sql}" : " INTERSECT #{intersect.sql}")
-        elsif except = opts[:except]
-          sql << (opts[:except_all] ? \
-            " EXCEPT ALL #{except.sql}" : " EXCEPT #{except.sql}")
-        end
-
-        if order = opts[:order]
-          sql << " ORDER BY #{expression_list(order)}"
-        end
-
-        if limit = opts[:limit]
-          if (offset = opts[:offset]) && (offset > 0)
-            sql = "SELECT * FROM (SELECT raw_sql_.*, ROWNUM raw_rnum_ FROM(#{sql}) raw_sql_ WHERE ROWNUM <= #{limit + offset}) WHERE raw_rnum_ > #{offset}"
-          else
-            sql = "SELECT * FROM (#{sql}) WHERE ROWNUM <= #{limit}"
-          end
-        end
-
-        sql
-      end
-
-      alias sql select_sql
     end
   end
 end

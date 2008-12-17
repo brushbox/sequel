@@ -1,5 +1,225 @@
 === HEAD
 
+* Make Database#schema raise an error if given a table that doesn't exist (jeremyevans) (#255)
+
+* Make Model#inspect call Model#inspect_values private method for easier overloading (bougyman)
+
+* Add methods to create and drop functions, triggers, and procedural languages on PostgreSQL (jeremyevans)
+
+* Fix Dataset#count when using UNION, EXCEPT, or INTERSECT (jeremyevans)
+
+* Make SQLite keep table's primary key information when dropping columns (jmhodges)
+
+* Support dropping indicies on SQLite (jmhodges)
+
+=== 2.8.0 (2008-12-05)
+
+* Support drop column operations inside a transaction on sqlite (jeremyevans)
+
+* Support literal strings with placeholders and subselects in prepared statements (jeremyevans)
+
+* Have the connection pool remove disconnected connections when the adapter supports it (jeremyevans)
+
+* Make Dataset#exists return a LiteralString (jeremyevans)
+
+* Support multiple SQL statements in one query in the MySQL adapter (jeremyevans)
+
+* Add stored procedure support for the MySQL and JDBC adapters (jeremyevans, krsgoss) (#252)
+
+* Support options when altering a column's type (for changing enums, varchar size, etc.) (jeremyevans)
+
+* Support AliasedExpressions in tables when using implicitly qualified arguments in joins (jeremyevans)
+
+* Support Dataset#except on Oracle (jeremyevans)
+
+* Raise errors when EXCEPT/INTERSECT is used when not supported (jeremyevans)
+
+* Fix ordering of UNION, INTERSECT, and EXCEPT statements (jeremyevans) (#253)
+
+* Support aliasing subselects in the Oracle adapter (jeremyevans)
+
+* Add a subadapter for the Progress RDBMS to the ODBC adapter (:db_type=>'progress') (groveriffic) (#251)
+
+* Make MySQL and Oracle adapters raise an Error if asked to do a SELECT DISTINCT ON (jeremyevans)
+
+* Set standard_conforming_strings = ON by default when using PostgreSQL, turn off with Sequel::Postgres.force_standard_strings = false (jeremyevans) (#247)
+
+* Fix Database#rename_table when using PostgreSQL (jeremyevans) (#248)
+
+* Whether to upcase or quote identifiers can now be set separately, via Sequel.upcase_identifiers= or the :upcase_identifiers database option (jeremyevans)
+
+* Support transactions in the ODBC adapter (dlee)
+
+* Support multi_insert_sql and unicode string literals in MSSQL shared adapter (dlee)
+
+* Make PostgreSQL use the default schema if parsing the schema for all tables at once, even if :schema=>nil option is used (jeremyevans)
+
+* Make MySQL adapter not raise an error when giving an SQL::Identifier object to the schema modification methods such as create_table (jeremyevans)
+
+* The keys of the hash returned by Database#schema without a table name are now quoted strings instead of symbols (jeremyevans)
+
+* Make Database#schema to handle implicit schemas on all databases and multiple identifier object types (jeremyevans)
+
+* Remove Sequel.odbc_mssql method (jeremyevans) (#249)
+
+* More optimization of Model#initialize (jeremyevans)
+
+* Treat interval as it's own type, not an integer type (jeremyevans)
+
+* Allow use of implicitly qualified symbol as argument to Symbol#qualify (:a.qualify(:b__c)=>b.c.a), fixes model associations in different schemas (jeremyevans) (#246)
+
+=== 2.7.1 (2008-11-04)
+
+* Fix PostgreSQL Date optimization so that it doesn't reject dates like 11/03/2008 (jeremyevans)
+
+=== 2.7.0 (2008-11-03)
+
+* Transform AssociationReflection from a single class to a class hierarchy (jeremyevans)
+
+* Optimize Date object creation in PostgreSQL adapter (jeremyevans)
+
+* Allow easier creation of custom association types, though support for them may still be suboptimal (jeremyevans)
+
+* Add :eager_grapher option to associations, which the user can use to override the default eager_graph code (jeremyevans)
+
+* Associations are now inherited when a model class is subclassed (jeremyevans)
+
+* Instance methods added by associations are now added to an anonymous module the class includes, allowing you to override them and use super (jeremyevans)
+
+* Add #add_graph_aliases (select_more for graphs), and allow use of arbitrary expressions when graphing (jeremyevans)
+
+* Fix a corner case where the wrong table name is used in eager_graph (jeremyevans)
+
+* Make Dataset#join_table take an option hash instead of a table_alias argument, add support for :implicit_qualifier option (jeremyevans)
+
+* Add :left_primary_key and :right_primary_key options to many_to_many associations (jeremyevans)
+
+* Add :primary_key option to one_to_many and many_to_one associations (jeremyevans)
+
+* Make after_load association callbacks take effect when eager loading via eager (jeremyevans)
+
+* Add a :uniq association option to many_to_many associations (jeremyevans)
+
+* Support using any expression as the argument to Symbol#like (jeremyevans)
+
+* Much better support for multiple schemas in PostgreSQL (jeremyevans) (#243)
+
+* The first argument to Model#initalize can no longer be nil, it must be a hash if it is given (jeremyevans)
+
+* Remove Sequel::Model.lazy_load_schema= setting (jeremyevans)
+
+* Lazily load model instance options such as raise_on_save_failure, for better performance (jeremyevans)
+
+* Make Model::Validiation::Errors more Rails-compatible (jeremyevans)
+
+* Refactor model hooks for performance (jeremyevans)
+
+* Major performance enhancement when fetching rows using PostgreSQL (jeremyevans)
+
+* Don't typecast serialized columns in models (jeremyevans)
+
+* Add Array#sql_array to handle ruby arrays of all two pairs as SQL arrays (jeremyevans) (#245)
+
+* Add ComplexExpression#== and #eql?, for checking equality (rubymage) (#244)
+
+* Allow full text search on PostgreSQL to include rows where a search column is NULL (jeremyevans)
+
+* PostgreSQL full text search queries with multiple columns are joined with space to prevent joining border words to one (michalbugno)
+
+* Don't modify a dataset's cached column information if calling #each with an option that modifies the columns (jeremyevans)
+
+* The PostgreSQL adapter will now generally default to using a unix socket in /tmp if no host is specified, instead of a tcp socket to localhost (jeremyevans)
+
+* Make Dataset#sql call Dataset#select_sql instead of being an alias, to allow for easier subclassing (jeremyevans)
+
+* Split Oracle adapter into shared and unshared parts, so Oracle is better supported when using JDBC (jeremyevans)
+
+* Fix automatic loading of Oracle driver when using JDBC adapter (bburton333) (#242)
+
+=== 2.6.0 (2008-10-11)
+
+* Make the sqlite adapter respect the Sequel.datetime_class setting, for timestamp and datetime types (jeremyevans)
+
+* Enhance the CASE statement support to include an optional expression (jarredholman)
+
+* Default to using the simple language if no language is specified for a full text index on PostgreSQL (michalbugno)
+
+* Add Model.raise_on_typecast_failure=, which makes it possible to not raise errors on invalid typecasts (michalbugno)
+
+* Add schema.rdoc file, which provides an brief description of the various parts of Sequel related to schema modification (jeremyevans)
+
+* Fix constraint generation when not using a proc or interpolated string (jeremyevans)
+
+* Make eager_graph respect associations' :order options (use :order_eager_graph=>false to disable) (jeremyevans)
+
+* Cache negative lookup when eagerly loading many_to_one associations where no objects have an associated object (jeremyevans)
+
+* Allow string keys to be used when using Dataset#multi_insert (jeremyevans)
+
+* Fix join_table when doing the first join for a dataset where the first source is a dataset when using unqualified columns (jeremyevans)
+
+* Fix a few corner cases in eager_graph (jeremyevans)
+
+* Support transactions on MSSQL (jeremyevans)
+
+* Use string literals in AS clauses on SQLite (jeremyevans) (#241)
+
+* AlterTableGenerator#set_column_allow_null was added to SET/DROP NOT NULL for columns (divoxx)
+
+* Database#tables now works for MySQL databases using the JDBC adapter (jeremyevans)
+
+* Database#drop_view can now take multiple arguments to drop multiple views at once (jeremyevans)
+
+* Schema modification methods (e.g. drop_table, create_table!) now remove the cached schema entry (jeremyevans)
+
+* Models can now determine their primary keys by looking at the schema (jeremyevans)
+
+* No longer include :numeric_precision and :max_chars entries in the schema column hashes, use the :db_type entry instead (jeremyevans)
+
+* Make schema parsing on PostgreSQL handle implicit schemas (e.g. schema(:schema__table)), so it works with models for tables outside the public schema (jeremyevans)
+
+* Significantly speed up schema parsing on MySQL (jeremyevans)
+
+* Include primary key information when parsing the schema (jeremyevans)
+
+* Fix schema generation of composite foreign keys on MySQL (clivecrous, jeremyevans)
+
+=== 2.5.0 (2008-09-03)
+
+* Add Dataset #set_defaults and #set_overrides, used for scoping the values used in insert/update statements (jeremyevans)
+
+* Allow Models to use the RETURNING clause when inserting records on PostgreSQL (jeremyevans)
+
+* Raise Sequel::DatabaseError instead of generic Sequel::Error for database errors, don't swallow tracebacks (jeremyevans)
+
+* Use INSERT ... RETURNING ... with PostgreSQL 8.2 and higher (jeremyevans)
+
+* Make insert_sql, delete_sql, and update_sql respect the :sql option (jeremyevans)
+
+* Default to converting 2 digit years, use Sequel.convert_two_digit_years = false to get back the old behavior (jeremyevans)
+
+* Make the PostgreSQL adapter with the pg driver use async_exec, so it doesn't block the entire interpreter (jeremyevans)
+
+* Make the schema generators support composite primary and foreign keys and unique constraints (jarredholman)
+
+* Work with the 2008.08.17 version of the pg gem (erikh)
+
+* Disallow abuse of SQL function syntax for types (use :type=>:varchar, :size=>255 instead of :type=>:varchar[255]) (jeremyevans)
+
+* Quote index names when creating or dropping indexes (jeremyevans, SanityInAnarchy)
+
+* Don't have column accessor methods override plugin instance methods (jeremyevans)
+
+* Allow validation of multiple attributes at once, with built in support for uniqueness checking of multiple columns (jeremyevans)
+
+* In PostgreSQL adapter, fix inserting a row with a primary key value inside a transaction (jeremyevans)
+
+* Allow before_save and before_update to affect the columns saved by save_changes (jeremyevans)
+
+* Make Dataset#single_value work when graphing, which fixes count and paginate on graphed datasets (jeremyevans)
+
+=== 2.4.0 (2008-08-06)
+
 * Handle Java::JavaSql::Date type in the JDBC adapter (jeremyevans)
 
 * Add support for read-only slave/writable master databases and database sharding (jeremyevans)

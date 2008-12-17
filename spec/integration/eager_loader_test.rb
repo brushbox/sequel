@@ -2,13 +2,12 @@ require File.join(File.dirname(__FILE__), 'spec_helper.rb')
 
 describe "Eagerly loading a tree structure" do
   before do
+    INTEGRATION_DB.instance_variable_set(:@schemas, nil)
+    INTEGRATION_DB.create_table!(:nodes) do
+      primary_key :id
+      foreign_key :parent_id, :nodes
+    end
     class ::Node < Sequel::Model
-      set_schema do
-        primary_key :id
-        foreign_key :parent_id, :nodes
-      end
-      create_table!
-      
       many_to_one :parent
       one_to_many :children, :key=>:parent_id
     
@@ -146,11 +145,11 @@ describe "Association Extensions" do
           @opts[:models][nil].create(vals.merge(:author_id=>author_id))
       end 
     end
+    INTEGRATION_DB.instance_variable_set(:@schemas, nil)
+    INTEGRATION_DB.create_table!(:authors) do
+      primary_key :id
+    end
     class ::Author < Sequel::Model
-      set_schema do
-        primary_key :id
-      end
-      create_table!
       one_to_many :authorships, :extend=>FindOrCreate, :dataset=>(proc do
         key = pk
         ds = Authorship.filter(:author_id=>key)
@@ -160,13 +159,12 @@ describe "Association Extensions" do
         ds  
       end)
     end
+    INTEGRATION_DB.create_table!(:authorships) do
+      primary_key :id
+      foreign_key :author_id, :authors
+      text :name
+    end
     class ::Authorship < Sequel::Model
-      set_schema do
-        primary_key :id
-        foreign_key :author_id, :authors
-        text :name
-      end
-      create_table!
       many_to_one :author
     end
     @author = Author.create
@@ -212,11 +210,11 @@ end
 
 describe "has_many :through has_many and has_one :through belongs_to" do
   before do
+    INTEGRATION_DB.instance_variable_set(:@schemas, nil)
+    INTEGRATION_DB.create_table!(:firms) do
+      primary_key :id
+    end
     class ::Firm < Sequel::Model
-      set_schema do
-        primary_key :id
-      end
-      create_table!
       one_to_many :clients
       one_to_many :invoices, :read_only=>true, \
         :dataset=>proc{Invoice.eager_graph(:client).filter(:client__firm_id=>pk)}, \
@@ -230,49 +228,48 @@ describe "has_many :through has_many and has_one :through belongs_to" do
           firms.each{|firm| firm.associations[:invoices] = []}
           Invoice.eager_graph(:client).filter(:client__firm_id=>id_map.keys).all do |inv|
             id_map[inv.client.firm_id].each do |firm|
-              inv.client.associations[:firm] = inv.associations[:firm] = firm
               firm.associations[:invoices] << inv
             end
           end
         end)
     end
 
+    INTEGRATION_DB.create_table!(:clients) do
+      primary_key :id
+      foreign_key :firm_id, :firms
+    end
     class ::Client < Sequel::Model
-      set_schema do
-        primary_key :id
-        foreign_key :firm_id, :firms
-      end
-      create_table!
       many_to_one :firm
       one_to_many :invoices
     end
 
+    INTEGRATION_DB.create_table!(:invoices) do
+      primary_key :id
+      foreign_key :client_id, :clients
+    end
     class ::Invoice < Sequel::Model
-      set_schema do
-        primary_key :id
-        foreign_key :client_id, :clients
-      end
-      create_table!
       many_to_one :client
       many_to_one :firm, :key=>nil, :read_only=>true, \
         :dataset=>proc{Firm.eager_graph(:clients).filter(:clients__id=>client_id)}, \
         :after_load=>(proc do |inv, firm|
           # Delete the cached associations from firm, because it only has the
           # client with this invoice, instead of all clients of the firm
-          inv.associations[:client] = firm.associations.delete(:clients).first
+          if c = firm.associations.delete(:clients)
+            firm.associations[:invoice_client] = c.first
+          end
+          inv.associations[:client] ||= firm.associations[:invoice_client]
         end), \
         :eager_loader=>(proc do |key_hash, invoices, associations|
           id_map = {}
           invoices.each do |inv|
             inv.associations[:firm] = nil
-            inv.associations[:client] = nil
             (id_map[inv.client_id] ||= []) << inv
           end
           Firm.eager_graph(:clients).filter(:clients__id=>id_map.keys).all do |firm|
             # Delete the cached associations from firm, because it only has the
             # clients related the invoices being eagerly loaded, instead of all
             # clients of the firm.
-            firm.associations.delete(:clients).each do |client|
+            firm.associations[:clients].each do |client|
               id_map[client.pk].each do |inv|
                 inv.associations[:firm] = firm
                 inv.associations[:client] = client
@@ -304,7 +301,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
 
   it "should return has_many :through has_many records for a single object" do
     invs = @firm1.invoices.sort_by{|x| x.pk}
-    sqls_should_be('SELECT invoices.id, invoices.client_id, client.id AS client_id_0, client.firm_id FROM invoices LEFT OUTER JOIN clients AS client ON (client.id = invoices.client_id) WHERE (client.firm_id = 1)')
+    sqls_should_be("SELECT invoices.id, invoices.client_id, client.id AS 'client_id_0', client.firm_id FROM invoices LEFT OUTER JOIN clients AS 'client' ON (client.id = invoices.client_id) WHERE (client.firm_id = 1)")
     invs.should == [@invoice1, @invoice2, @invoice3]
     invs[0].client.should == @client1
     invs[1].client.should == @client1
@@ -316,7 +313,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
 
   it "should eagerly load has_many :through has_many records for multiple objects" do
     firms = Firm.order(:id).eager(:invoices).all
-    sqls_should_be("SELECT * FROM firms ORDER BY id", "SELECT invoices.id, invoices.client_id, client.id AS client_id_0, client.firm_id FROM invoices LEFT OUTER JOIN clients AS client ON (client.id = invoices.client_id) WHERE (client.firm_id IN (1, 2))")
+    sqls_should_be("SELECT * FROM firms ORDER BY id", "SELECT invoices.id, invoices.client_id, client.id AS 'client_id_0', client.firm_id FROM invoices LEFT OUTER JOIN clients AS 'client' ON (client.id = invoices.client_id) WHERE (client.firm_id IN (1, 2))")
     firms.should == [@firm1, @firm2]
     firm1, firm2 = firms
     invs1 = firm1.invoices.sort_by{|x| x.pk}
@@ -337,7 +334,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
 
   it "should return has_one :through belongs_to records for a single object" do
     firm = @invoice1.firm
-    sqls_should_be('SELECT firms.id, clients.id AS clients_id, clients.firm_id FROM firms LEFT OUTER JOIN clients ON (clients.firm_id = firms.id) WHERE (clients.id = 1)')
+    sqls_should_be("SELECT firms.id, clients.id AS 'clients_id', clients.firm_id FROM firms LEFT OUTER JOIN clients ON (clients.firm_id = firms.id) WHERE (clients.id = 1)")
     firm.should == @firm1
     @invoice1.client.should == @client1
     @invoice1.client.firm.should == @firm1
@@ -347,7 +344,7 @@ describe "has_many :through has_many and has_one :through belongs_to" do
 
   it "should eagerly load has_one :through belongs_to records for multiple objects" do
     invs = Invoice.order(:id).eager(:firm).all
-    sqls_should_be("SELECT * FROM invoices ORDER BY id", "SELECT firms.id, clients.id AS clients_id, clients.firm_id FROM firms LEFT OUTER JOIN clients ON (clients.firm_id = firms.id) WHERE (clients.id IN (1, 2, 3))")
+    sqls_should_be("SELECT * FROM invoices ORDER BY id", "SELECT firms.id, clients.id AS 'clients_id', clients.firm_id FROM firms LEFT OUTER JOIN clients ON (clients.firm_id = firms.id) WHERE (clients.id IN (1, 2, 3))")
     invs.should == [@invoice1, @invoice2, @invoice3, @invoice4, @invoice5]
     invs[0].firm.should == @firm1
     invs[0].client.should == @client1
@@ -375,13 +372,13 @@ end
 
 describe "Polymorphic Associations" do
   before do
+    INTEGRATION_DB.instance_variable_set(:@schemas, nil)
+    INTEGRATION_DB.create_table!(:assets) do
+      primary_key :id
+      integer :attachable_id
+      text :attachable_type
+    end
     class ::Asset < Sequel::Model
-      set_schema do
-        primary_key :id
-        integer :attachable_id
-        text :attachable_type
-      end
-      create_table!
       many_to_one :attachable, :reciprocal=>:assets, \
         :dataset=>(proc do
           klass = attachable_type.constantize
@@ -411,11 +408,10 @@ describe "Polymorphic Associations" do
       end 
     end 
   
+    INTEGRATION_DB.create_table!(:posts) do
+      primary_key :id
+    end
     class ::Post < Sequel::Model
-      set_schema do
-        primary_key :id
-      end
-      create_table!
       one_to_many :assets, :key=>:attachable_id do |ds|
         ds.filter(:attachable_type=>'Post')
       end 
@@ -438,11 +434,10 @@ describe "Polymorphic Associations" do
       end
     end 
   
+    INTEGRATION_DB.create_table!(:notes) do
+      primary_key :id
+    end
     class ::Note < Sequel::Model
-      set_schema do
-        primary_key :id
-      end
-      create_table!
       one_to_many :assets, :key=>:attachable_id do |ds|
         ds.filter(:attachable_type=>'Note')
       end 
@@ -550,12 +545,12 @@ end
 
 describe "many_to_one/one_to_many not referencing primary key" do
   before do
+    INTEGRATION_DB.instance_variable_set(:@schemas, nil)
+    INTEGRATION_DB.create_table!(:clients) do
+      primary_key :id
+      text :name
+    end
     class ::Client < Sequel::Model
-      set_schema do
-        primary_key :id
-        text :name
-      end
-      create_table!
       one_to_many :invoices, :reciprocal=>:client, \
         :dataset=>proc{Invoice.filter(:client_name=>name)}, \
         :eager_loader=>(proc do |key_hash, clients, associations|
@@ -585,12 +580,11 @@ describe "many_to_one/one_to_many not referencing primary key" do
       end
     end 
   
+    INTEGRATION_DB.create_table!(:invoices) do
+      primary_key :id
+      text :client_name
+    end
     class ::Invoice < Sequel::Model
-      set_schema do
-        primary_key :id
-        text :client_name
-      end
-      create_table!
       many_to_one :client, :key=>:client_name, \
         :dataset=>proc{Client.filter(:name=>client_name)}, \
         :eager_loader=>(proc do |key_hash, invoices, associations|

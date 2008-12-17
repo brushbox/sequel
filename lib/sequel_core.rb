@@ -22,21 +22,30 @@ end
 #
 #   Sequel.sqlite('blog.db'){|db| puts db.users.count}  
 #
-# Sequel can use either Time or DateTime for times returned from the
-# database.  It defaults to Time.  To change it to DateTime, use:
-#
-#   Sequel.datetime_class = DateTime
-#
 # Sequel converts the column type tinyint to a boolean by default,
 # you can override the conversion to use tinyint as an integer:
 #
 #   Sequel.convert_tinyint_to_bool = false
+#
+# Sequel converts two digit years in Dates and DateTimes by default,
+# so 01/02/03 is interpreted at January 2nd, 2003, and 12/13/99 is interpreted
+# as December 13, 1999.. You can override this # to treat those dates as
+# January 2nd, 0003 and December 13, 0099, respectively, by setting: 
+#
+#   Sequel.convert_two_digit_years = false
+#
+# Sequel can use either Time or DateTime for times returned from the
+# database.  It defaults to Time.  To change it to DateTime, use:
+#
+#   Sequel.datetime_class = DateTime
 module Sequel
-  @datetime_class = Time
   @convert_tinyint_to_bool = true
+  @convert_two_digit_years = true
+  @datetime_class = Time
   
-  metaattr_accessor :datetime_class
   metaattr_accessor :convert_tinyint_to_bool
+  metaattr_accessor :convert_two_digit_years
+  metaattr_accessor :datetime_class
 
   # Creates a new database object based on the supplied connection string
   # and optional arguments.  The specified scheme determines the database
@@ -74,26 +83,19 @@ module Sequel
   # and speed is a priority, you may want to set this to true:
   #
   #   Sequel.single_threaded = true
-  #
-  # Note that some database adapters (e.g. MySQL) have issues with single threaded mode if
-  # you try to perform more than one query simultaneously.  For example, the
-  # following code will not work well in single threaded mode on MySQL:
-  #
-  #   DB[:items].each{|i| DB[:nodes].filter(:item_id=>i[:id]).each{|n| puts "#{i} #{n}"}}
-  #
-  # Basically, you can't issue another query inside a call to Dataset#each in single
-  # threaded mode.  There is a fairly easy fix, just use Dataset#all inside
-  # Dataset#each for the outer query:
-  #
-  #   DB[:items].all{|i| DB[:nodes].filter(:item_id=>i[:id]).each{|n| puts "#{i} #{n}"}}
-  #
-  # Dataset#all gets all of the returned objects before calling the block, so the query
-  # isn't left open. Some of the adapters do this internally, and thus don't have a
-  # problem issuing queries inside of Dataset#each.
   def self.single_threaded=(value)
     Database.single_threaded = value
   end
 
+  # Set whether to upcase identifiers for all databases by default. By default,
+  # Sequel upcases identifiers unless the database folds unquoted identifiers to
+  # lower case (MySQL, PostgreSQL, and SQLite).
+  #
+  #   Sequel.upcase_identifiers = false
+  def self.upcase_identifiers=(value)
+    Database.upcase_identifiers = value
+  end
+  
   # Always returns false, since ParseTree support has been removed.
   def self.use_parse_tree
     false

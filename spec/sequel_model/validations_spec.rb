@@ -48,6 +48,31 @@ describe Sequel::Model::Validation::Errors do
     msgs.size.should == 3
     msgs.should include('blow blieuh', 'blow blich', 'blay bliu')
   end
+
+  specify "should return the number of error messages using #count" do
+    @errors.count.should == 0
+    @errors.add(:a, 'b')
+    @errors.count.should == 1
+    @errors.add(:a, 'c')
+    @errors.count.should == 2
+    @errors.add(:b, 'c')
+    @errors.count.should == 3
+  end
+
+  specify "should return the array of error messages for a given attribute using #on" do
+    @errors.add(:a, 'b')
+    @errors.on(:a).should == ['b']
+    @errors.add(:a, 'c')
+    @errors.on(:a).should == ['b', 'c']
+    @errors.add(:b, 'c')
+    @errors.on(:a).should == ['b', 'c']
+  end
+
+  specify "should return nil if there are no error messages for a given attribute using #on" do
+    @errors.on(:a).should == nil
+    @errors.add(:b, 'b')
+    @errors.on(:a).should == nil
+  end
 end
 
 describe Sequel::Model do
@@ -77,6 +102,22 @@ describe Sequel::Model do
     @c.has_validations?.should == false
     @c.validates_each(:xx) {1}
     @c.has_validations?.should == true
+  end
+  
+  specify "should validate multiple attributes at once" do
+    o = @c.new
+    def o.xx
+      1
+    end
+    def o.yy
+      2
+    end
+    vals = nil
+    atts = nil
+    @c.validates_each([:xx, :yy]){|obj,a,v| atts=a; vals=v}
+    o.valid?
+    vals.should == [1,2]
+    atts.should == [:xx, :yy]
   end
   
   specify "should overwrite existing validation with the same tag and attribute" do
@@ -667,6 +708,7 @@ describe Sequel::Model, "Validations" do
         
         case sql
         when /COUNT.*username = '0records'/
+          yield({:v => 0})
         when /COUNT.*username = '2records'/
           yield({:v => 2})
         when /COUNT.*username = '1record'/
@@ -688,6 +730,59 @@ describe Sequel::Model, "Validations" do
     @user = User.load(:id=>4, :username => "1record", :password => "anothertest")
     @user.should_not be_valid
     @user.errors.full_messages.should == ['username is already taken']
+
+    @user = User.load(:id=>3, :username => "1record", :password => "anothertest")
+    @user.should be_valid
+    @user.errors.full_messages.should == []
+
+    @user = User.new(:username => "0records", :password => "anothertest")
+    @user.should be_valid
+    @user.errors.full_messages.should == []
+  end
+  
+  it "should validate the uniqueness of multiple columns" do
+    class ::User < Sequel::Model
+      validations.clear
+      validates do
+        uniqueness_of [:username, :password]
+      end
+    end
+    User.dataset.extend(Module.new {
+      def fetch_rows(sql)
+        @db << sql
+        
+        case sql
+        when /COUNT.*username = '0records'/
+          yield({:v => 0})
+        when /COUNT.*username = '2records'/
+          yield({:v => 2})
+        when /COUNT.*username = '1record'/
+          yield({:v => 1})
+        when /username = '1record'/
+          if sql =~ /password = 'anothertest'/
+            yield({:id => 3, :username => "1record", :password => "anothertest"})
+          else
+            yield({:id => 4, :username => "1record", :password => "test"})
+          end
+        end
+      end
+    })
+    
+    @user = User.new(:username => "2records", :password => "anothertest")
+    @user.should_not be_valid
+    @user.errors.full_messages.should == ['username and password is already taken']
+
+    @user = User.new(:username => "1record", :password => "anothertest")
+    @user.should_not be_valid
+    @user.errors.full_messages.should == ['username and password is already taken']
+
+    @user = User.load(:id=>4, :username => "1record", :password => "anothertest")
+    @user.should_not be_valid
+    @user.errors.full_messages.should == ['username and password is already taken']
+
+    @user = User.load(:id=>3, :username => "1record", :password => "test")
+    @user.should_not be_valid
+    @user.errors.full_messages.should == ['username and password is already taken']
 
     @user = User.load(:id=>3, :username => "1record", :password => "anothertest")
     @user.should be_valid

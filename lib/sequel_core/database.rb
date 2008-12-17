@@ -14,7 +14,7 @@ module Sequel
     include Schema::SQL
 
     # Array of supported database adapters
-    ADAPTERS = %w'ado db2 dbi informix jdbc mysql odbc odbc_mssql openbase oracle postgres sqlite'.collect{|x| x.to_sym}
+    ADAPTERS = %w'ado db2 dbi informix jdbc mysql odbc openbase oracle postgres sqlite'.collect{|x| x.to_sym}
 
     SQL_BEGIN = 'BEGIN'.freeze
     SQL_COMMIT = 'COMMIT'.freeze
@@ -29,6 +29,12 @@ module Sequel
     # Whether to quote identifiers (columns and tables) by default
     @@quote_identifiers = true
 
+    # Whether to upcase identifiers (columns and tables) by default
+    @@upcase_identifiers = nil
+
+    # The default schema to use
+    attr_accessor :default_schema
+
     # Array of SQL loggers to use for this database
     attr_accessor :loggers
 
@@ -38,26 +44,41 @@ module Sequel
     # The connection pool for this database
     attr_reader :pool
 
-    # Whether to quote identifiers (columns and tables) for this database
-    attr_writer :quote_identifiers
-    
     # The prepared statement objects for this database, keyed by name
     attr_reader :prepared_statements
 
+    # Whether to quote identifiers (columns and tables) for this database
+    attr_writer :quote_identifiers
+    
+    # Whether to upcase identifiers (columns and tables) for this database
+    attr_writer :upcase_identifiers
+    
     # Constructs a new instance of a database connection with the specified
     # options hash.
     #
     # Sequel::Database is an abstract class that is not useful by itself.
+    #
+    # Takes the following options:
+    # * :default_schema : The default schema to use, should generally be nil
+    # * :disconnection_proc: A proc used to disconnect the connection.
+    # * :loggers : An array of loggers to use.
+    # * :quote_identifiers : Whether to quote identifiers
+    # * :single_threaded : Whether to use a single-threaded connection pool
+    #
+    # All options given are also passed to the ConnectionPool.  If a block
+    # is given, it is used as the connection_proc for the ConnectionPool.
     def initialize(opts = {}, &block)
       @opts = opts
       
       @quote_identifiers = opts.include?(:quote_identifiers) ? opts[:quote_identifiers] : @@quote_identifiers
       @single_threaded = opts.include?(:single_threaded) ? opts[:single_threaded] : @@single_threaded
       @schemas = nil
+      @default_schema = opts[:default_schema]
       @prepared_statements = {}
       @transactions = []
       @pool = (@single_threaded ? SingleThreadedPool : ConnectionPool).new(connection_pool_default_options.merge(opts), &block)
       @pool.connection_proc = proc{|server| connect(server)} unless block
+      @pool.disconnection_proc = proc{|conn| disconnect_connection(conn)} unless opts[:disconnection_proc]
 
       @loggers = Array(opts[:logger]) + Array(opts[:loggers])
       ::Sequel::DATABASES.push(self)
@@ -142,6 +163,12 @@ module Sequel
       @@single_threaded = value
     end
 
+    # Sets the default quote_identifiers mode for new databases.
+    # See Sequel.quote_identifiers=.
+    def self.upcase_identifiers=(value)
+      @@upcase_identifiers = value
+    end
+
     ### Private Class Methods ###
 
     # Sets the adapter scheme for the Database class. Call this method in
@@ -212,10 +239,10 @@ module Sequel
       ds = Sequel::Dataset.new(self)
     end
     
-    # Disconnects from the database. This method should be overridden by 
-    # descendants.
+    # Disconnects all available connections from the connection pool.  If any
+    # connections are currently in use, they will not be disconnected.
     def disconnect
-      raise NotImplementedError, "#disconnect should be overridden by adapters"
+      pool.disconnect
     end
 
     # Executes the given SQL. This method should be overridden in descendants.
@@ -250,9 +277,8 @@ module Sequel
     #   DB.fetch('SELECT * FROM items WHERE name = ?', my_name).print
     def fetch(sql, *args, &block)
       ds = dataset
-      sql = sql.gsub('?') {|m|  ds.literal(args.shift)}
-      ds.opts[:sql] = sql
-      ds.fetch_rows(sql, &block) if block
+      ds.opts[:sql] = Sequel::SQL::PlaceholderLiteralString.new(sql, args)
+      ds.each(&block) if block
       ds
     end
     alias_method :>>, :fetch
@@ -335,17 +361,19 @@ module Sequel
       @pool.hold(server || :default, &block)
     end
 
-    # Returns true if a table with the given name exists.
+    # Returns true if a table with the given name exists.  This requires a query
+    # to the database unless this database object already has the schema for
+    # the given table name.
     def table_exists?(name)
-      begin 
-        if respond_to?(:tables)
-          tables.include?(name.to_sym)
-        else
+      if @schemas && @schemas[name]
+        true
+      else
+        begin 
           from(name).first
           true
+        rescue
+          false
         end
-      rescue
-        false
       end
     end
     
@@ -355,7 +383,7 @@ module Sequel
       synchronize(server){|conn|}
       true
     end
-    
+
     # A simple implementation of SQL transactions. Nested transactions are not 
     # supported - calling #transaction within a transaction will reuse the 
     # current transaction. Should be overridden for databases that support nested 
@@ -363,19 +391,19 @@ module Sequel
     def transaction(server=nil)
       synchronize(server) do |conn|
         return yield(conn) if @transactions.include?(Thread.current)
-        log_info(SQL_BEGIN)
-        conn.execute(SQL_BEGIN)
+        log_info(begin_transaction_sql)
+        conn.execute(begin_transaction_sql)
         begin
           @transactions << Thread.current
           yield(conn)
         rescue Exception => e
-          log_info(SQL_ROLLBACK)
-          conn.execute(SQL_ROLLBACK)
-          raise e unless Error::Rollback === e
+          log_info(rollback_transaction_sql)
+          conn.execute(rollback_transaction_sql)
+          transaction_error(e)
         ensure
           unless e
-            log_info(SQL_COMMIT)
-            conn.execute(SQL_COMMIT)
+            log_info(commit_transaction_sql)
+            conn.execute(commit_transaction_sql)
           end
           @transactions.delete(Thread.current)
         end
@@ -384,15 +412,25 @@ module Sequel
     
     # Typecast the value to the given column_type. Can be overridden in
     # adapters to support database specific column types.
+    # This method should raise Sequel::Error::InvalidValue if assigned value
+    # is invalid.
     def typecast_value(column_type, value)
       return nil if value.nil?
       case column_type
       when :integer
-        Integer(value)
+        begin
+          Integer(value)
+        rescue ArgumentError => e
+          raise Sequel::Error::InvalidValue, e.message.inspect
+        end
       when :string
         value.to_s
       when :float
-        Float(value)
+        begin
+          Float(value)
+        rescue ArgumentError => e
+          raise Sequel::Error::InvalidValue, e.message.inspect
+        end
       when :decimal
         case value
         when BigDecimal
@@ -402,7 +440,7 @@ module Sequel
         when Integer
           value.to_s.to_d
         else
-          raise ArgumentError, "invalid value for BigDecimal: #{value.inspect}"
+          raise Sequel::Error::InvalidValue, "invalid value for BigDecimal: #{value.inspect}"
         end
       when :boolean
         case value
@@ -420,7 +458,7 @@ module Sequel
         when String
           value.to_date
         else
-          raise ArgumentError, "invalid value for Date: #{value.inspect}"
+          raise Sequel::Error::InvalidValue, "invalid value for Date: #{value.inspect}"
         end
       when :time
         case value
@@ -429,10 +467,10 @@ module Sequel
         when String
           value.to_time
         else
-          raise ArgumentError, "invalid value for Time: #{value.inspect}"
+          raise Sequel::Error::InvalidValue, "invalid value for Time: #{value.inspect}"
         end
       when :datetime
-        raise(ArgumentError, "invalid value for #{tc}: #{value.inspect}") unless value.is_one_of?(DateTime, Date, Time, String)
+        raise(Sequel::Error::InvalidValue, "invalid value for Datetime: #{value.inspect}") unless value.is_one_of?(DateTime, Date, Time, String)
         if Sequel.datetime_class === value
           # Already the correct class, no need to convert
           value
@@ -446,8 +484,14 @@ module Sequel
       else
         value
       end
-    end 
+    end
 
+    # Returns true if the database upcases identifiers.
+    def upcase_identifiers?
+      return @upcase_identifiers unless @upcase_identifiers.nil?
+      @upcase_identifiers = @opts.include?(:upcase_identifiers) ? @opts[:upcase_identifiers] : (@@upcase_identifiers.nil? ? upcase_identifiers_default : @@upcase_identifiers)
+    end
+    
     # Returns the URI identifying the database.
     # This method can raise an error if the database used options
     # instead of a connection string.
@@ -471,6 +515,43 @@ module Sequel
     
     private
     
+    # SQL to BEGIN a transaction.
+    def begin_transaction_sql
+      SQL_BEGIN
+    end
+
+    # SQL to COMMIT a transaction.
+    def commit_transaction_sql
+      SQL_COMMIT
+    end
+
+    # The default options for the connection pool.
+    def connection_pool_default_options
+      {}
+    end
+    
+    # SQL to ROLLBACK a transaction.
+    def rollback_transaction_sql
+      SQL_ROLLBACK
+    end
+    
+    # Convert the given exception to a DatabaseError, keeping message
+    # and traceback.
+    def raise_error(exception, opts={})
+      if !opts[:classes] || exception.is_one_of?(*opts[:classes])
+        e = DatabaseError.new("#{exception.class} #{exception.message}")
+        e.set_backtrace(exception.backtrace)
+        raise e
+      else
+        raise exception
+      end
+    end
+    
+    # Split the schema information from the table
+    def schema_and_table(table_name)
+      schema_utility_dataset.schema_and_table(table_name)
+    end
+
     # Return the options for the given server by merging the generic
     # options for all server with the specific options for the given
     # server specified in the :servers option.
@@ -491,9 +572,17 @@ module Sequel
       opts
     end
 
-    # The default options for the connection pool.
-    def connection_pool_default_options
-      {}
+    # Raise a database error unless the exception is an Error::Rollback.
+    def transaction_error(e, *classes)
+      raise_error(e, :classes=>classes) unless Error::Rollback === e
+    end
+
+    # Sets whether to upcase identifiers by default.  Should be
+    # overridden in subclasses for databases that fold unquoted
+    # identifiers to lower case instead of uppercase, such as
+    # MySQL, PostgreSQL, and SQLite.
+    def upcase_identifiers_default
+      true
     end
   end
 end

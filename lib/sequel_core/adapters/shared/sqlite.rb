@@ -2,31 +2,33 @@ module Sequel
   module SQLite
     module DatabaseMethods
       AUTO_VACUUM = {'0' => :none, '1' => :full, '2' => :incremental}.freeze
-      SCHEMA_TYPE_RE = /\A(\w+)\((\d+)\)\z/
       SYNCHRONOUS = {'0' => :off, '1' => :normal, '2' => :full}.freeze
       TABLES_FILTER = "type = 'table' AND NOT name = 'sqlite_sequence'"
       TEMP_STORE = {'0' => :default, '1' => :file, '2' => :memory}.freeze
       
+      # Run all alter_table commands in a transaction.  This is technically only
+      # needed for drop column.
+      def alter_table(name, generator=nil, &block)
+        transaction{super}
+      end
+
       # SQLite supports limited table modification.  You can add a column
       # or an index.  Dropping columns is supported by copying the table into
       # a temporary table, dropping the table, and creating a new table without
       # the column inside of a transaction.
       def alter_table_sql(table, op)
         case op[:op]
-        when :add_column
+        when :add_column, :add_index, :drop_index
           super
-        when :add_index
-          index_definition_sql(table, op)
         when :drop_column
           columns_str = (schema_parse_table(table, {}).map{|c| c[0]} - Array(op[:name])).join(",")
-          ["BEGIN TRANSACTION",
-           "CREATE TEMPORARY TABLE #{table}_backup(#{columns_str})",
+          defined_columns_str = column_list_sql parse_pragma(table, {}).reject{ |c| c[:name] == op[:name].to_s}
+          ["CREATE TEMPORARY TABLE #{table}_backup(#{defined_columns_str})",
            "INSERT INTO #{table}_backup SELECT #{columns_str} FROM #{table}",
            "DROP TABLE #{table}",
-           "CREATE TABLE #{table}(#{columns_str})",
+           "CREATE TABLE #{table}(#{defined_columns_str})",
            "INSERT INTO #{table} SELECT #{columns_str} FROM #{table}_backup",
-           "DROP TABLE #{table}_backup",
-           "COMMIT"]
+           "DROP TABLE #{table}_backup"]
         else
           raise Error, "Unsupported ALTER TABLE operation"
         end
@@ -83,39 +85,37 @@ module Sequel
       
       private
       
+      # SQLite folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers by default.
+      def upcase_identifiers_default
+        false
+      end
+
       # SQLite supports schema parsing using the table_info PRAGMA, so
       # parse the output of that into the format Sequel expects.
       def schema_parse_table(table_name, opts)
-        rows = self["PRAGMA table_info(?)", table_name].collect do |row|
+        parse_pragma(table_name, opts).map do |row|
+          [row.delete(:name).to_sym, row]
+        end
+      end
+
+      def parse_pragma(table_name, opts)
+        self["PRAGMA table_info(?)", table_name].map do |row|
           row.delete(:cid)
-          row[:column] = row.delete(:name)
-          row[:allow_null] = row.delete(:notnull).to_i == 0 ? 'YES' : 'NO'
+          row[:allow_null] = row.delete(:notnull).to_i == 0
           row[:default] = row.delete(:dflt_value)
-          row[:primary_key] = row.delete(:pk).to_i == 1 ? true : false 
+          row[:primary_key] = row.delete(:pk).to_i == 1
+          row[:default] = nil if row[:default].blank?
           row[:db_type] = row.delete(:type)
-          if m = SCHEMA_TYPE_RE.match(row[:db_type])
-            row[:db_type] = m[1]
-            row[:max_chars] = m[2].to_i
-          else
-             row[:max_chars] = nil
-          end
-          row[:numeric_precision] = nil
+          row[:type] = schema_column_type(row[:db_type])
           row
         end
-        schema_parse_rows(rows)
-      end
-      
-      # SQLite doesn't support getting the schema of all tables at once,
-      # so loop through the output of #tables to get them.
-      def schema_parse_tables(opts)
-        schemas = {}
-        tables.each{|table| schemas[table] = schema_parse_table(table, opts)}
-        schemas
       end
     end
     
     # Instance methods for datasets that connect to an SQLite database
     module DatasetMethods
+      include Dataset::UnsupportedIntersectExceptAll
+
       # SQLite does not support pattern matching via regular expressions.
       # SQLite is case insensitive (depending on pragma), so use LIKE for
       # ILIKE.
@@ -169,6 +169,11 @@ module Sequel
       
       private
       
+      # SQLite uses string literals instead of identifiers in AS clauses.
+      def as_sql(expression, aliaz)
+        "#{expression} AS #{literal(aliaz.to_s)}"
+      end
+
       # Call execute_insert on the database with the given SQL.
       def execute_insert(sql, opts={})
         @db.execute_insert(sql, {:server=>@opts[:server] || :default}.merge(opts))

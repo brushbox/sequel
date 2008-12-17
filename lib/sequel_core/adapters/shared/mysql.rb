@@ -7,9 +7,6 @@ module Sequel
       NOT_NULL = Sequel::Schema::SQL::NOT_NULL
       NULL = Sequel::Schema::SQL::NULL
       PRIMARY_KEY = Sequel::Schema::SQL::PRIMARY_KEY
-      SQL_BEGIN = Sequel::Database::SQL_BEGIN
-      SQL_COMMIT = Sequel::Database::SQL_COMMIT
-      SQL_ROLLBACK = Sequel::Database::SQL_ROLLBACK
       TYPES = Sequel::Schema::SQL::TYPES
       UNIQUE = Sequel::Schema::SQL::UNIQUE
       UNSIGNED = Sequel::Schema::SQL::UNSIGNED
@@ -17,15 +14,13 @@ module Sequel
       # Use MySQL specific syntax for rename column, set column type, and
       # drop index cases.
       def alter_table_sql(table, op)
-        type = type_literal(op[:type])
-        type << '(255)' if type == 'varchar'
         case op[:op]
         when :rename_column
-          "ALTER TABLE #{table} CHANGE COLUMN #{literal(op[:name])} #{literal(op[:new_name])} #{type}"
+          "ALTER TABLE #{quote_schema_table(table)} CHANGE COLUMN #{quote_identifier(op[:name])} #{quote_identifier(op[:new_name])} #{type_literal(op)}"
         when :set_column_type
-          "ALTER TABLE #{table} CHANGE COLUMN #{literal(op[:name])} #{literal(op[:name])} #{type}"
+          "ALTER TABLE #{quote_schema_table(table)} CHANGE COLUMN #{quote_identifier(op[:name])} #{quote_identifier(op[:name])} #{type_literal(op)}"
         when :drop_index
-          "DROP INDEX #{default_index_name(table, op[:columns])} ON #{table}"
+          "#{drop_index_sql(table, op)} ON #{quote_schema_table(table)}"
         else
           super(table, op)
         end
@@ -36,50 +31,35 @@ module Sequel
         AUTO_INCREMENT
       end
       
-      # Handle MySQL specific column syntax (not sure why).
-      def column_definition_sql(column)
-        if column[:type] == :check
-          return constraint_definition_sql(column)
-        end
-        sql = "#{literal(column[:name].to_sym)} #{TYPES[column[:type]]}"
-        column[:size] ||= 255 if column[:type] == :varchar
-        elements = column[:size] || column[:elements]
-        sql << literal(Array(elements)) if elements
-        sql << UNSIGNED if column[:unsigned]
-        sql << UNIQUE if column[:unique]
-        sql << NOT_NULL if column[:null] == false
-        sql << NULL if column[:null] == true
-        sql << " DEFAULT #{literal(column[:default])}" if column.include?(:default)
-        sql << PRIMARY_KEY if column[:primary_key]
-        sql << " #{auto_increment_sql}" if column[:auto_increment]
-        if column[:table]
-          sql << ", FOREIGN KEY (#{literal(column[:name].to_sym)}) REFERENCES #{column[:table]}"
-          sql << literal(Array(column[:key])) if column[:key]
-          sql << " ON DELETE #{on_delete_clause(column[:on_delete])}" if column[:on_delete]
-        end
-        sql
+      # Handle MySQL specific syntax for column references
+      def column_references_sql(column)
+        "#{", FOREIGN KEY (#{quote_identifier(column[:name])})" unless column[:type] == :check}#{super(column)}"
       end
       
       # Handle MySQL specific index SQL syntax
       def index_definition_sql(table_name, index)
-        index_name = index[:name] || default_index_name(table_name, index[:columns])
-        unique = "UNIQUE " if index[:unique]
-        case index[:type]
+        index_name = quote_identifier(index[:name] || default_index_name(table_name, index[:columns]))
+        index_type = case index[:type]
         when :full_text
-          "CREATE FULLTEXT INDEX #{index_name} ON #{table_name} #{literal(index[:columns])}"
+          "FULLTEXT "
         when :spatial
-          "CREATE SPATIAL INDEX #{index_name} ON #{table_name} #{literal(index[:columns])}"
-        when nil
-          "CREATE #{unique}INDEX #{index_name} ON #{table_name} #{literal(index[:columns])}"
+          "SPATIAL "
         else
-          "CREATE #{unique}INDEX #{index_name} ON #{table_name} #{literal(index[:columns])} USING #{index[:type]}"
+          using = " USING #{index[:type]}" unless index[:type] == nil
+          "UNIQUE " if index[:unique]
         end
+        "CREATE #{index_type}INDEX #{index_name} ON #{quote_schema_table(table_name)} #{literal(index[:columns])}#{using}"
       end
       
       # Get version of MySQL server, used for determined capabilities.
       def server_version
         m = /(\d+)\.(\d+)\.(\d+)/.match(get(:version[]))
         @server_version ||= (m[1].to_i * 10000) + (m[2].to_i * 100) + m[3].to_i
+      end
+      
+      # Return an array of symbols specifying table names in the current database.
+      def tables(server=nil)
+        self['SHOW TABLES'].server(server).map{|r| r.values.first.to_sym}
       end
       
       # Changes the database in use by issuing a USE statement.  I would be
@@ -93,32 +73,30 @@ module Sequel
       
       private
       
-      # Always quote identifiers for the schema parser dataset.
-      def schema_ds_dataset
-        ds = schema_utility_dataset.clone
-        ds.quote_identifiers = true
-        ds
-      end
-      
-      # Allow other database schema's to be queried using the :database
-      # option.  Allow all database's schema to be used by setting
-      # the :database option to nil.  If the database option is not specified,
-      # uses the currently connected database.
-      def schema_ds_filter(table_name, opts)
-        filt = super
-        # Restrict it to the given or current database, unless specifically requesting :database = nil
-        filt = SQL::BooleanExpression.new(:AND, filt, {:c__table_schema=>opts[:database] || database_name}) if opts[:database] || !opts.include?(:database)
-        filt
+      # MySQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers by default.
+      def upcase_identifiers_default
+        false
       end
 
-      # MySQL doesn't support table catalogs, so just join on schema and table name.
-      def schema_ds_join(table_name, opts)
-        [:information_schema__columns, {:table_schema => :table_schema, :table_name => :table_name}, :c]
+      # Use the MySQL specific DESCRIBE syntax to get a table description.
+      def schema_parse_table(table_name, opts)
+        self["DESCRIBE ?", SQL::Identifier.new(table_name)].map do |row|
+          row.delete(:Extra)
+          row[:allow_null] = row.delete(:Null) == 'YES'
+          row[:default] = row.delete(:Default)
+          row[:primary_key] = row.delete(:Key) == 'PRI'
+          row[:default] = nil if row[:default].blank?
+          row[:db_type] = row.delete(:Type)
+          row[:type] = schema_column_type(row[:db_type])
+          [row.delete(:Field).to_sym, row]
+        end
       end
     end
   
     # Dataset methods shared by datasets that use MySQL databases.
     module DatasetMethods
+      include Dataset::UnsupportedIntersectExcept
+
       BOOL_TRUE = '1'.freeze
       BOOL_FALSE = '0'.freeze
       COMMA_SEPARATOR = ', '.freeze
@@ -183,7 +161,7 @@ module Sequel
 
       # Transforms an CROSS JOIN to an INNER JOIN if the expr is not nil.
       # Raises an error on use of :full_outer type, since MySQL doesn't support it.
-      def join_table(type, table, expr=nil, table_alias=nil)
+      def join_table(type, table, expr=nil, table_alias={})
         type = :inner if (type == :cross) && !expr.nil?
         raise(Sequel::Error, "MySQL doesn't support FULL OUTER JOIN") if type == :full_outer
         super(type, table, expr, table_alias)
@@ -213,9 +191,8 @@ module Sequel
       
       # MySQL specific syntax for inserting multiple values at once.
       def multi_insert_sql(columns, values)
-        columns = column_list(columns)
         values = values.map {|r| literal(Array(r))}.join(COMMA_SEPARATOR)
-        ["INSERT INTO #{source_list(@opts[:from])} (#{columns}) VALUES #{values}"]
+        ["INSERT INTO #{source_list(@opts[:from])} (#{identifier_list(columns)}) VALUES #{values}"]
       end
       
       # MySQL uses the nonstandard ` (backtick) for quoting identifiers.
@@ -277,6 +254,16 @@ module Sequel
         end
 
         sql
+      end
+
+      private
+
+      # MySQL doesn't support DISTINCT ON
+      def select_distinct_sql(sql, opts)
+        if opts[:distinct]
+          raise(Error, "DISTINCT ON not supported by MySQL") unless opts[:distinct].empty?
+          sql << " DISTINCT"
+        end
       end
     end
   end

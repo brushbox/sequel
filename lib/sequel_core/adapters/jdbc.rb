@@ -1,9 +1,10 @@
 require 'java'
+require 'sequel_core/dataset/stored_procedures'
 
 module Sequel
   # Houses Sequel's JDBC support when running on JRuby.
   # Support for individual database types is done using sub adapters.
-  # PostgreSQL, MySQL, SQLite, and MSSQL all have relatively good support,
+  # PostgreSQL, MySQL, SQLite, Oracle, and MSSQL all have relatively good support,
   # close the the level supported by the native adapter.
   # PostgreSQL, MySQL, SQLite can load necessary support using
   # the jdbc-* gem, if it is installed, though they will work if you
@@ -51,7 +52,11 @@ module Sequel
         JDBC.load_gem('sqlite3')
         org.sqlite.JDBC
       end,
-      :oracle=>proc{oracle.jdbc.driver.OracleDriver},
+      :oracle=>proc do |db|
+        require 'sequel_core/adapters/jdbc/oracle'
+        db.extend(Sequel::JDBC::Oracle::DatabaseMethods)
+        Java::oracle.jdbc.driver.OracleDriver
+      end,
       :sqlserver=>proc do |db|
         require 'sequel_core/adapters/shared/mssql'
         db.extend(Sequel::MSSQL::DatabaseMethods)
@@ -89,6 +94,37 @@ module Sequel
         end
       end
       
+      # Execute the given stored procedure with the give name. If a block is
+      # given, the stored procedure should return rows.
+      def call_sproc(name, opts = {})
+        args = opts[:args] || []
+        sql = "{call #{name}(#{args.map{'?'}.join(',')})}"
+        synchronize(opts[:server]) do |conn|
+          cps = conn.prepareCall(sql)
+
+          i = 0
+          args.each{|arg| set_ps_arg(cps, arg, i+=1)}
+
+          begin
+            if block_given?
+              yield cps.executeQuery
+            else
+              case opts[:type]
+              when :insert
+                cps.executeUpdate
+                last_insert_id(conn, opts)
+              else
+                cps.executeUpdate
+              end
+            end
+          rescue NativeException, JavaSQL::SQLException => e
+            raise_error(e)
+          ensure
+            cps.close
+          end
+        end
+      end
+      
       # Connect to the database using JavaSQL::DriverManager.getConnection.
       def connect(server)
         setup_connection(JavaSQL::DriverManager.getConnection(uri(server_opts(server))))
@@ -99,14 +135,10 @@ module Sequel
         JDBC::Dataset.new(self, opts)
       end
       
-      # Close all adapter connections
-      def disconnect
-        @pool.disconnect {|c| c.close}
-      end
-      
       # Execute the given SQL.  If a block is given, if should be a SELECT
       # statement or something else that returns rows.
       def execute(sql, opts={}, &block)
+        return call_sproc(sql, opts, &block) if opts[:sproc]
         return execute_prepared_statement(sql, opts, &block) if sql.is_one_of?(Symbol, Dataset)
         log_info(sql)
         synchronize(opts[:server]) do |conn|
@@ -126,7 +158,7 @@ module Sequel
               end
             end
           rescue NativeException, JavaSQL::SQLException => e
-            raise Error, e.message
+            raise_error(e)
           ensure
             stmt.close
           end
@@ -154,18 +186,18 @@ module Sequel
           return yield(conn) if @transactions.include?(Thread.current)
           stmt = conn.createStatement
           begin
-            log_info(Sequel::Database::SQL_BEGIN)
-            stmt.execute(Sequel::Database::SQL_BEGIN)
+            log_info(begin_transaction_sql)
+            stmt.execute(begin_transaction_sql)
             @transactions << Thread.current
             yield(conn)
           rescue Exception => e
-            log_info(Sequel::Database::SQL_ROLLBACK)
-            stmt.execute(Sequel::Database::SQL_ROLLBACK)
-            raise e unless Error::Rollback === e
+            log_info(rollback_transaction_sql)
+            stmt.execute(rollback_transaction_sql)
+            transaction_error(e)
           ensure
             unless e
-              log_info(Sequel::Database::SQL_COMMIT)
-              stmt.execute(Sequel::Database::SQL_COMMIT)
+              log_info(commit_transaction_sql)
+              stmt.execute(commit_transaction_sql)
             end
             stmt.close
             @transactions.delete(Thread.current)
@@ -185,6 +217,11 @@ module Sequel
       alias url uri
       
       private
+      
+      # Close given adapter connections
+      def disconnect_connection(c)
+        c.close
+      end
       
       # Execute the prepared statement.  If the provided name is a
       # dataset, use that as the prepared statement, otherwise use
@@ -232,7 +269,7 @@ module Sequel
               end
             end
           rescue NativeException, JavaSQL::SQLException => e
-            raise Error, e.message
+            raise_error(e)
           ensure
             cps.close unless name
           end
@@ -283,6 +320,8 @@ module Sequel
     end
     
     class Dataset < Sequel::Dataset
+      include StoredProcedures
+      
       # Use JDBC PreparedStatements instead of emulated ones.  Statements
       # created using #prepare are cached at the connection level to allow
       # reuse.  This also supports bind variables by using unnamed
@@ -309,10 +348,27 @@ module Sequel
         end
       end
       
-      # Create an unnamed prepared statement and call it.  Allows the
-      # use of bind variables.
-      def call(type, hash, values=nil, &block)
-        prepare(type, nil, values).call(hash, &block)
+      # Use JDBC CallableStatements to execute stored procedures.  Only supported
+      # if the underlying database has stored procedure support.
+      module StoredProcedureMethods
+        include Sequel::Dataset::StoredProcedureMethods
+        
+        private
+        
+        # Execute the database stored procedure with the stored arguments.
+        def execute(sql, opts={}, &block)
+          super(@sproc_name, {:args=>@sproc_args, :sproc=>true, :type=>sql_query_type}.merge(opts), &block)
+        end
+        
+        # Same as execute, explicit due to intricacies of alias and super.
+        def execute_dui(sql, opts={}, &block)
+          super(@sproc_name, {:args=>@sproc_args, :sproc=>true, :type=>sql_query_type}.merge(opts), &block)
+        end
+        
+        # Same as execute, explicit due to intricacies of alias and super.
+        def execute_insert(sql, opts={}, &block)
+          super(@sproc_name, {:args=>@sproc_args, :sproc=>true, :type=>sql_query_type}.merge(opts), &block)
+        end
       end
       
       # Correctly return rows from the database and return them as hashes.
@@ -348,7 +404,7 @@ module Sequel
       
       # Create a named prepared statement that is stored in the
       # database (and connection) for reuse.
-      def prepare(type, name, values=nil)
+      def prepare(type, name=nil, values=nil)
         ps = to_prepared_statement(type, values)
         ps.extend(PreparedStatementMethods)
         if name
@@ -356,6 +412,13 @@ module Sequel
           db.prepared_statements[name] = ps
         end
         ps
+      end
+      
+      private
+      
+      # Extend the dataset with the JDBC stored procedure methods.
+      def prepare_extend_sproc(ds)
+        ds.extend(StoredProcedureMethods)
       end
     end
   end

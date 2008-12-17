@@ -1,4 +1,4 @@
-%w'callback convenience pagination prepared_statements query schema sql'.each do |f|
+%w'callback convenience pagination prepared_statements query schema sql unsupported'.each do |f|
   require "sequel_core/dataset/#{f}"
 end
 
@@ -48,11 +48,13 @@ module Sequel
 
     # All methods that should have a ! method added that modifies
     # the receiver.
-    MUTATION_METHODS = %w'and distinct exclude exists filter from from_self full_outer_join graph
+    MUTATION_METHODS = %w'add_graph_aliases and distinct exclude exists
+    filter from from_self full_outer_join graph
     group group_and_count group_by having inner_join intersect invert join
     left_outer_join limit naked or order order_by order_more paginate query reject
     reverse reverse_order right_outer_join select select_all select_more
-    set_graph_aliases set_model sort sort_by unfiltered union unordered where'.collect{|x| x.to_sym}
+    set_defaults set_graph_aliases set_model set_overrides sort sort_by
+    unfiltered union unordered where'.collect{|x| x.to_sym}
 
     NOTIMPL_MSG = "This method must be overridden in Sequel adapters".freeze
     STOCK_TRANSFORMS = {
@@ -73,13 +75,16 @@ module Sequel
     # The hash of options for this dataset, keys are symbols.
     attr_accessor :opts
 
+    # Whether to quote identifiers for this dataset
+    attr_writer :quote_identifiers
+    
     # The row_proc for this database, should be a Proc that takes
     # a single hash argument and returns the object you want to
     # fetch_rows to return.
     attr_accessor :row_proc
 
-    # Whether to quote identifiers for this dataset
-    attr_writer :quote_identifiers
+    # Whether to upcase identifiers for this dataset
+    attr_writer :upcase_identifiers
     
     # Constructs a new instance of a dataset with an associated database and 
     # options. Datasets are usually constructed by invoking Database methods:
@@ -95,6 +100,7 @@ module Sequel
     def initialize(db, opts = nil)
       @db = db
       @quote_identifiers = db.quote_identifiers? if db.respond_to?(:quote_identifiers?)
+      @upcase_identifiers = db.upcase_identifiers? if db.respond_to?(:upcase_identifiers?)
       @opts = opts || {}
       @row_proc = nil
       @transform = nil
@@ -183,35 +189,37 @@ module Sequel
       end
     end
 
-    # Deletes the records in the dataset. Adapters should override this method.
+    # Deletes the records in the dataset.  The returned value is generally the
+    # number of records deleted, but that is adapter dependent.
     def delete(*args)
       execute_dui(delete_sql(*args))
     end
     
-    # Iterates over the records in the dataset.
+    # Iterates over the records in the dataset and returns set.  If opts
+    # have been passed that modify the columns, reset the column information.
     def each(opts = nil, &block)
-      if graph = @opts[:graph]
-        graph_each(opts, &block)
-      else
-        row_proc = @row_proc unless opts && opts[:naked]
-        transform = @transform
-        fetch_rows(select_sql(opts)) do |r|
-          r = transform_load(r) if transform
-          r = row_proc[r] if row_proc
-          yield r
+      if opts && opts.keys.any?{|o| COLUMN_CHANGE_OPTS.include?(o)}
+        prev_columns = @columns
+        begin
+          _each(opts, &block)
+        ensure
+          @columns = prev_columns
         end
+      else
+        _each(opts, &block)
       end
       self
     end
 
     # Executes a select query and fetches records, passing each record to the
-    # supplied block. Adapters should override this method.
+    # supplied block.  The yielded records are generally hashes with symbol keys,
+    # but that is adapter dependent.
     def fetch_rows(sql, &block)
       raise NotImplementedError, NOTIMPL_MSG
     end
   
-    # Inserts values into the associated table. Adapters should override this
-    # method.
+    # Inserts values into the associated table.  The returned value is generally
+    # the value of the primary key for the inserted row, but that is adapter dependent.
     def insert(*values)
       execute_dui(insert_sql(*values))
     end
@@ -258,6 +266,12 @@ module Sequel
     # don't have to override both methods.
     def set(*args)
       update(*args)
+    end
+
+    # Set the default values for insert and update statements.  The values passed
+    # to insert or update are merged into this hash.
+    def set_defaults(hash)
+      clone(:defaults=>(@opts[:defaults]||{}).merge(hash))
     end
 
     # Associates or disassociates the dataset with a model(s). If
@@ -342,6 +356,12 @@ module Sequel
       self
     end
     
+    # Set values that override hash arguments given to insert and update statements.
+    # This hash is merged into the hash provided to insert or update.
+    def set_overrides(hash)
+      clone(:overrides=>hash.merge(@opts[:overrides]||{}))
+    end
+
     # Sets a value transform which is used to convert values loaded and saved
     # to/from the database. The transform should be supplied as a hash. Each
     # value in the hash should be an array containing two proc objects - one
@@ -399,7 +419,13 @@ module Sequel
       end
     end
     
-    # Updates values for the dataset. Adapters should override this method.
+    # Whether this dataset upcases identifiers.
+    def upcase_identifiers?
+      @upcase_identifiers
+    end
+    
+    # Updates values for the dataset.  The returned value is generally the
+    # number of rows updated, but that is adapter dependent.
     def update(*args)
       execute_dui(update_sql(*args))
     end
@@ -416,6 +442,23 @@ module Sequel
 
     private
     
+    # Runs #graph_each if graphing.  Otherwise, iterates through the records
+    # yielded by #fetch_rows, applying any row_proc or transform if necessary,
+    # and yielding the result.
+    def _each(opts, &block)
+      if @opts[:graph] and !(opts && opts[:graph] == false)
+        graph_each(opts, &block)
+      else
+        row_proc = @row_proc unless opts && opts[:naked]
+        transform = @transform
+        fetch_rows(select_sql(opts)) do |r|
+          r = transform_load(r) if transform
+          r = row_proc[r] if row_proc
+          yield r
+        end
+      end
+    end
+
     # Execute the given SQL on the database using execute.
     def execute(sql, opts={}, &block)
       @db.execute(sql, {:server=>@opts[:server] || :read_only}.merge(opts), &block)

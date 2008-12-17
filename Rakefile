@@ -1,15 +1,19 @@
 require "rake"
 require "rake/clean"
 require "rake/gempackagetask"
-require "rake/rdoctask"
-require "fileutils"
 require "spec/rake/spectask"
+begin
+  require "hanna/rdoctask"
+rescue LoadError
+  require "rake/rdoctask"
+end
+require "fileutils"
 
 include FileUtils
 
 NAME = 'sequel'
-VERS = '2.3.0'
-CLEAN.include ["**/.*.sw?", "pkg", ".config", "rdoc", "coverage"]
+VERS = '2.8.0'
+CLEAN.include ["**/.*.sw?", "pkg", ".config", "rdoc", "coverage", "www/public/*.html"]
 RDOC_OPTS = ["--quiet", "--line-numbers", "--inline-source", '--title', \
   'Sequel: The Database Toolkit for Ruby', '--main', 'README']
 
@@ -73,13 +77,19 @@ end
 
 ### Website
 
-desc "Update sequel.rubyforge.org"
-task :website => [:rdoc]
-task :website do
+desc "Update Non-RDoc section of sequel.rubyforge.org"
+task :website_base do
   sh %{www/make_www.rb}
   sh %{scp -r www/public/* rubyforge.org:/var/www/gforge-projects/sequel/}
+end
+
+desc "Update RDoc section of sequel.rubyforge.org"
+task :website_rdoc=>[:rerdoc] do
   sh %{scp -r rdoc/* rubyforge.org:/var/www/gforge-projects/sequel/rdoc/}
 end
+
+desc "Update sequel.rubyforge.org"
+task :website=>[:website_base, :website_rdoc]
 
 ### Specs
 

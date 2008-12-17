@@ -6,6 +6,7 @@ context "A new Database" do
   end
   teardown do
     Sequel.quote_identifiers = false
+    Sequel.upcase_identifiers = false
   end
   
   specify "should receive options" do
@@ -39,13 +40,39 @@ context "A new Database" do
     cc.should == 1234
   end
 
-  specify "should respect the :quote_identifiers and :single_threaded options" do
-    db = Sequel::Database.new(:quote_identifiers=>false, :single_threaded=>true)
-    db.quote_identifiers?.should == false
+  specify "should respect the :single_threaded option" do
+    db = Sequel::Database.new(:single_threaded=>true)
     db.pool.should be_a_kind_of(Sequel::SingleThreadedPool)
-    db = Sequel::Database.new(:quote_identifiers=>true, :single_threaded=>false)
-    db.quote_identifiers?.should == true
+    db = Sequel::Database.new(:single_threaded=>false)
     db.pool.should be_a_kind_of(Sequel::ConnectionPool)
+  end
+
+  specify "should respect the :quote_identifiers option" do
+    db = Sequel::Database.new(:quote_identifiers=>false)
+    db.quote_identifiers?.should == false
+    db = Sequel::Database.new(:quote_identifiers=>true)
+    db.quote_identifiers?.should == true
+  end
+
+  specify "should respect the :upcase_identifiers option" do
+    Sequel.upcase_identifiers = false
+    db = Sequel::Database.new(:upcase_identifiers=>false)
+    db.upcase_identifiers?.should == false
+    db.upcase_identifiers = true
+    db.upcase_identifiers?.should == true
+    db = Sequel::Database.new(:upcase_identifiers=>true)
+    db.upcase_identifiers?.should == true
+    db.upcase_identifiers = false
+    db.upcase_identifiers?.should == false
+    Sequel.upcase_identifiers = true
+    db = Sequel::Database.new(:upcase_identifiers=>false)
+    db.upcase_identifiers?.should == false
+    db.upcase_identifiers = true
+    db.upcase_identifiers?.should == true
+    db = Sequel::Database.new(:upcase_identifiers=>true)
+    db.upcase_identifiers?.should == true
+    db.upcase_identifiers = false
+    db.upcase_identifiers?.should == false
   end
 
   specify "should use the default Sequel.quote_identifiers value" do
@@ -59,6 +86,26 @@ context "A new Database" do
     Sequel::Database.new({}).quote_identifiers?.should == false
   end
 
+  specify "should use the default Sequel.upcase_identifiers value" do
+    Sequel.upcase_identifiers = true
+    Sequel::Database.new({}).upcase_identifiers?.should == true
+    Sequel.upcase_identifiers = false
+    Sequel::Database.new({}).upcase_identifiers?.should == false
+    Sequel::Database.upcase_identifiers = true
+    Sequel::Database.new({}).upcase_identifiers?.should == true
+    Sequel::Database.upcase_identifiers = false
+    Sequel::Database.new({}).upcase_identifiers?.should == false
+  end
+
+  specify "should respect the upcase_indentifiers_default method if Sequel.upcase_identifiers = nil" do
+    Sequel.upcase_identifiers = nil
+    Sequel::Database.new({}).upcase_identifiers?.should == true
+    x = Class.new(Sequel::Database){def upcase_identifiers_default; false end}
+    x.new({}).upcase_identifiers?.should == false
+    y = Class.new(Sequel::Database){def upcase_identifiers_default; true end}
+    y.new({}).upcase_identifiers?.should == true
+  end
+
   specify "should just use a :uri option for jdbc with the full connection string" do
     Sequel::Database.should_receive(:adapter_class).once.with(:jdbc).and_return(Sequel::Database)
     db = Sequel.connect('jdbc:test://host/db_name')
@@ -67,15 +114,20 @@ context "A new Database" do
   end
 end
 
-context "Database#connect" do
-  specify "should raise Sequel::Error::NotImplemented" do
-    proc {Sequel::Database.new.connect}.should raise_error(NotImplementedError)
+context "Database#disconnect" do
+  specify "should call pool.disconnect" do
+    d = Sequel::Database.new
+    p = d.pool
+    a = 1
+    p.meta_def(:disconnect){a += 1}
+    d.disconnect.should == 2
+    a.should == 2
   end
 end
 
-context "Database#disconnect" do
+context "Database#connect" do
   specify "should raise Sequel::Error::NotImplemented" do
-    proc {Sequel::Database.new.disconnect}.should raise_error(NotImplementedError)
+    proc {Sequel::Database.new.connect}.should raise_error(NotImplementedError)
   end
 end
 
@@ -437,14 +489,12 @@ end
 context "Database#table_exists?" do
   setup do
     @db = DummyDatabase.new
-    @db.stub!(:tables).and_return([:a, :b])
+    @db.instance_variable_set(:@schemas, {:a=>[]})
     @db2 = DummyDatabase.new
   end
   
-  specify "should use Database#tables if available" do
+  specify "should use schema information if available" do
     @db.table_exists?(:a).should be_true
-    @db.table_exists?(:b).should be_true
-    @db.table_exists?(:c).should be_false
   end
   
   specify "should otherwise try to select the first record from the table's dataset" do
@@ -998,5 +1048,44 @@ context "Database#server_opts" do
   specify "should raise an error if the specific opts is not a proc or hash" do
     opts = {:host=>1, :database=>2, :servers=>{:server1=>2}}
     proc{MockDatabase.new(opts).send(:server_opts, :server1)}.should raise_error(Sequel::Error)
+  end
+end
+
+context "Database#raise_error" do
+  specify "should reraise if the exception class is not in opts[:classes]" do
+    e = Class.new(StandardError)
+    proc{MockDatabase.new.send(:raise_error, e.new(''), :classes=>[])}.should raise_error(e)
+  end
+
+  specify "should convert the exception to a DatabaseError if the exception class is not in opts[:classes]" do
+    proc{MockDatabase.new.send(:raise_error, Interrupt.new(''), :classes=>[Interrupt])}.should raise_error(Sequel::DatabaseError)
+  end
+
+  specify "should convert the exception to a DatabaseError if opts[:classes] if not present" do
+    proc{MockDatabase.new.send(:raise_error, Interrupt.new(''))}.should raise_error(Sequel::DatabaseError)
+  end
+end
+
+context "Database#typecast_value" do
+  setup do
+    @db = Sequel::Database.new(1 => 2, :logger => 3)
+  end
+  specify "should raise InvalidValue when setting invalid integer" do
+    proc{@db.typecast_value(:integer, "13a")}.should raise_error(Sequel::Error::InvalidValue)
+  end
+  specify "should raise InvalidValue when setting invalid float" do
+    proc{@db.typecast_value(:float, "4.e2")}.should raise_error(Sequel::Error::InvalidValue)
+  end
+  specify "should raise InvalidValue when setting invalid decimal" do
+    proc{@db.typecast_value(:decimal, :invalid_value)}.should raise_error(Sequel::Error::InvalidValue)
+  end
+  specify "should raise InvalidValue when setting invalid date" do
+    proc{@db.typecast_value(:date, Object.new)}.should raise_error(Sequel::Error::InvalidValue)
+  end
+  specify "should raise InvalidValue when setting invalid time" do
+    proc{@db.typecast_value(:time, Date.new)}.should raise_error(Sequel::Error::InvalidValue)
+  end
+  specify "should raise InvalidValue when setting invalid datetime" do
+    proc{@db.typecast_value(:datetime, 4)}.should raise_error(Sequel::Error::InvalidValue)
   end
 end

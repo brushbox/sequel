@@ -2,41 +2,19 @@ module Sequel
   class Model
     # The setter methods (methods ending with =) that are never allowed
     # to be called automatically via set.
-    RESTRICTED_SETTER_METHODS = %w"== === []= taguri= typecast_empty_string_to_nil= typecast_on_assignment= strict_param_setting= raise_on_save_failure="
-
-    # The current cached associations.  A hash with the keys being the
-    # association name symbols and the values being the associated object
-    # or nil (many_to_one), or the array of associated objects (*_to_many).
-    attr_reader :associations
-
-    # The columns that have been updated.  This isn't completely accurate,
-    # see Model#[]=.
-    attr_reader :changed_columns
-    
-    # Whether this model instance should raise an exception instead of
-    # returning nil on a failure to save/save_changes/etc.
-    attr_writer :raise_on_save_failure
-
-    # Whether this model instance should raise an error if attempting
-    # to call a method through set/update and their variants that either
-    # doesn't exist or access to it is denied.
-    attr_writer :strict_param_setting
-
-    # Whether this model instance should typecast the empty string ('') to
-    # nil for columns that are non string or blob.
-    attr_writer :typecast_empty_string_to_nil
-
-    # Whether this model instance should typecast on attribute assignment
-    attr_writer :typecast_on_assignment
+    RESTRICTED_SETTER_METHODS = %w"== === []= taguri= typecast_empty_string_to_nil= typecast_on_assignment= strict_param_setting= raise_on_save_failure= raise_on_typecast_failure="
 
     # The hash of attribute values.  Keys are symbols with the names of the
     # underlying database columns.
     attr_reader :values
 
     class_attr_reader :columns, :dataset, :db, :primary_key, :str_columns
+    class_attr_overridable :db_schema, :raise_on_save_failure, :raise_on_typecast_failure, :strict_param_setting, :typecast_empty_string_to_nil, :typecast_on_assignment
+    remove_method :db_schema=
     
     # Creates new instance with values set to passed-in Hash.
-    # If a block is given, yield the instance to the block.
+    # If a block is given, yield the instance to the block unless
+    # from_db is true.
     # This method runs the after_initialize hook after
     # it has optionally yielded itself to the block.
     #
@@ -45,15 +23,7 @@ module Sequel
     #   string keys will work if from_db is false.
     # * from_db - should only be set by Model.load, forget it
     #   exists.
-    def initialize(values = nil, from_db = false, &block)
-      values ||=  {}
-      @associations = {}
-      @db_schema = model.db_schema
-      @changed_columns = []
-      @raise_on_save_failure = model.raise_on_save_failure
-      @strict_param_setting = model.strict_param_setting
-      @typecast_on_assignment = model.typecast_on_assignment
-      @typecast_empty_string_to_nil = model.typecast_empty_string_to_nil
+    def initialize(values = {}, from_db = false)
       if from_db
         @new = false
         @values = values
@@ -61,10 +31,9 @@ module Sequel
         @values = {}
         @new = true
         set(values)
+        changed_columns.clear 
+        yield self if block_given?
       end
-      @changed_columns.clear 
-      
-      yield self if block
       after_initialize
     end
     
@@ -81,7 +50,7 @@ module Sequel
       # If the column isn't in @values, we can't assume it is
       # NULL in the database, so assume it has changed.
       if new? || !@values.include?(column) || value != @values[column]
-        @changed_columns << column unless @changed_columns.include?(column)
+        changed_columns << column unless changed_columns.include?(column)
         @values[column] = typecast_value(column, value)
       end
     end
@@ -103,6 +72,19 @@ module Sequel
     # the model makes it so you can use model instead of
     # self.class.
     alias_method :model, :class
+
+    # The current cached associations.  A hash with the keys being the
+    # association name symbols and the values being the associated object
+    # or nil (many_to_one), or the array of associated objects (*_to_many).
+    def associations
+      @associations ||= {}
+    end
+
+    # The columns that have been updated.  This isn't completely accurate,
+    # see Model#[]=.
+    def changed_columns
+      @changed_columns ||= []
+    end
 
     # Deletes and returns self.  Does not run destroy hooks.
     # Look into using destroy instead.
@@ -153,7 +135,7 @@ module Sequel
     # Returns a string representation of the model instance including
     # the class name and values.
     def inspect
-      "#<#{model.name} @values=#{@values.inspect}>"
+      "#<#{model.name} @values=#{inspect_values}>"
     end
 
     # Returns attribute names as an array of symbols.
@@ -191,7 +173,8 @@ module Sequel
     # exists in the database.
     def refresh
       @values = this.first || raise(Error, "Record not found")
-      @associations.clear
+      changed_columns.clear
+      associations.clear
       self
     end
     alias_method :reload, :refresh
@@ -199,7 +182,8 @@ module Sequel
     # Creates or updates the record, after making sure the record
     # is valid.  If the record is not valid, or before_save,
     # before_create (if new?), or before_update (if !new?) return
-    # false, returns nil unless raise_on_save_failure is true.
+    # false, returns nil unless raise_on_save_failure is true (if it
+    # is true, it raises an error).
     # Otherwise, returns self. You can provide an optional list of
     # columns to update, in which case it only updates those columns.
     def save(*columns)
@@ -212,31 +196,39 @@ module Sequel
     # in which case it only updates those columns.
     # If before_save, before_create (if new?), or before_update
     # (if !new?) return false, returns nil unless raise_on_save_failure
-    # is true.  Otherwise, returns self.
+    # is true (if it is true, it raises an error).  Otherwise, returns self.
     def save!(*columns)
+      opts = columns.extract_options!
       return save_failure(:save) if before_save == false
       if @new
         return save_failure(:create) if before_create == false
-        iid = model.dataset.insert(@values)
-        # if we have a regular primary key and it's not set in @values,
-        # we assume it's the last inserted id
-        if (pk = primary_key) && !(Array === pk) && !@values[pk]
-          @values[pk] = iid
-        end
-        if pk
-          @this = nil # remove memoized this dataset
-          refresh
+        ds = model.dataset
+        if ds.respond_to?(:insert_select) and h = ds.insert_select(@values)
+          @values = h
+          @this = nil
+        else
+          iid = ds.insert(@values)
+          # if we have a regular primary key and it's not set in @values,
+          # we assume it's the last inserted id
+          if (pk = primary_key) && !(Array === pk) && !@values[pk]
+            @values[pk] = iid
+          end
+          if pk
+            @this = nil # remove memoized this dataset
+            refresh
+          end
         end
         @new = false
         after_create
       else
         return save_failure(:update) if before_update == false
         if columns.empty?
-          this.update(@values)
-          @changed_columns = []
+          vals = opts[:changed] ? @values.reject{|k,v| !changed_columns.include?(k)} : @values
+          this.update(vals)
+          changed_columns.clear
         else # update only the specified columns
-          this.update(@values.reject {|k, v| !columns.include?(k)})
-          @changed_columns.reject! {|c| columns.include?(c)}
+          this.update(@values.reject{|k, v| !columns.include?(k)})
+          changed_columns.reject!{|c| columns.include?(c)}
         end
         after_update
       end
@@ -248,7 +240,7 @@ module Sequel
     # chanaged.  If no columns have been changed, returns nil.  If unable to
     # save, returns false unless raise_on_save_failure is true.
     def save_changes
-      save(*@changed_columns) || false unless @changed_columns.empty?
+      save(:changed=>true) || false unless changed_columns.empty?
     end
 
     # Updates the instance with the supplied values with support for virtual
@@ -368,7 +360,7 @@ module Sequel
       raise(Sequel::Error, 'associated object does not have a primary key') if opts.need_associated_primary_key? && !o.pk
       return if run_association_callbacks(opts, :before_add, o) == false
       send(opts._add_method, o)
-      @associations[opts[:name]].push(o) if @associations.include?(opts[:name])
+      associations[opts[:name]].push(o) if associations.include?(opts[:name])
       add_reciprocal_object(opts, o)
       run_association_callbacks(opts, :after_add, o)
       o
@@ -377,35 +369,39 @@ module Sequel
     # Add/Set the current object to/as the given object's reciprocal association.
     def add_reciprocal_object(opts, o)
       return unless reciprocal = opts.reciprocal
-      case opts[:type]
-      when :many_to_many, :many_to_one
+      if opts.reciprocal_array?
         if array = o.associations[reciprocal] and !array.include?(self)
           array.push(self)
         end
-      when :one_to_many
+      else
         o.associations[reciprocal] = self
       end
+    end
+
+    # Default inspection output for a record, overwrite to change the way #inspect prints the @values hash
+    def inspect_values
+      @values.inspect
     end
 
     # Load the associated objects using the dataset
     def load_associated_objects(opts, reload=false)
       name = opts[:name]
-      if @associations.include?(name) and !reload
-        @associations[name]
+      if associations.include?(name) and !reload
+        associations[name]
       else
-        objs = if opts.single_associated_object?
+        objs = if opts.returns_array?
+          send(opts.dataset_method).all
+        else
           if !opts[:key]
             send(opts.dataset_method).all.first
           elsif send(opts[:key])
             send(opts.dataset_method).first
           end
-        else
-          objs = send(opts.dataset_method).all
         end
         run_association_callbacks(opts, :after_load, objs)
         # Only one_to_many associations should set the reciprocal object
         objs.each{|o| add_reciprocal_object(opts, o)} if opts.set_reciprocal_to_self?
-        @associations[name] = objs
+        associations[name] = objs
       end
     end
 
@@ -413,8 +409,8 @@ module Sequel
     def remove_all_associated_objects(opts)
       raise(Sequel::Error, 'model object does not have a primary key') unless pk
       send(opts._remove_all_method)
-      ret = @associations[opts[:name]].each{|o| remove_reciprocal_object(opts, o)} if @associations.include?(opts[:name])
-      @associations[opts[:name]] = []
+      ret = associations[opts[:name]].each{|o| remove_reciprocal_object(opts, o)} if associations.include?(opts[:name])
+      associations[opts[:name]] = []
       ret
     end
 
@@ -424,7 +420,7 @@ module Sequel
       raise(Sequel::Error, 'associated object does not have a primary key') if opts.need_associated_primary_key? && !o.pk
       return if run_association_callbacks(opts, :before_remove, o) == false
       send(opts._remove_method, o)
-      @associations[opts[:name]].delete_if{|x| o === x} if @associations.include?(opts[:name])
+      associations[opts[:name]].delete_if{|x| o === x} if associations.include?(opts[:name])
       remove_reciprocal_object(opts, o)
       run_association_callbacks(opts, :after_remove, o)
       o
@@ -433,21 +429,19 @@ module Sequel
     # Remove/unset the current object from/as the given object's reciprocal association.
     def remove_reciprocal_object(opts, o)
       return unless reciprocal = opts.reciprocal
-      case opts[:type]
-      when :many_to_many, :many_to_one
+      if opts.reciprocal_array?
         if array = o.associations[reciprocal]
           array.delete_if{|x| self === x}
         end
-      when :one_to_many
+      else
         o.associations[reciprocal] = nil
       end
     end
 
     # Run the callback for the association with the object.
     def run_association_callbacks(reflection, callback_type, object)
-      raise_error = @raise_on_save_failure
-      raise_error = true if reflection[:type] == :many_to_one
-      stop_on_false = true if [:before_add, :before_remove].include?(callback_type)
+      raise_error = raise_on_save_failure || !reflection.returns_array?
+      stop_on_false = [:before_add, :before_remove].include?(callback_type)
       reflection[callback_type].each do |cb|
         res = case cb
         when Symbol
@@ -466,7 +460,7 @@ module Sequel
 
     # Raise an error if raise_on_save_failure is true
     def save_failure(action, raise_error = nil)
-      raise_error = @raise_on_save_failure if raise_error.nil?
+      raise_error = raise_on_save_failure if raise_error.nil?
       raise(Error, "unable to #{action} record") if raise_error
     end
 
@@ -474,14 +468,14 @@ module Sequel
     def set_restricted(hash, only, except)
       columns_not_set = model.instance_variable_get(:@columns).blank?
       meths = setter_methods(only, except)
-      strict_param_setting = @strict_param_setting
+      strict = strict_param_setting
       hash.each do |k,v|
         m = "#{k}="
         if meths.include?(m)
           send(m, v)
         elsif columns_not_set && (Symbol === k)
           self[k] = v
-        elsif strict_param_setting
+        elsif strict
           raise Error, "method #{m} doesn't exist or access is restricted to it"
         end
       end
@@ -521,10 +515,24 @@ module Sequel
     # typecast_value method, so database adapters can override/augment the handling
     # for database specific column types.
     def typecast_value(column, value)
-      return value unless @typecast_on_assignment && @db_schema && (col_schema = @db_schema[column])
-      value = nil if value == '' and @typecast_empty_string_to_nil and col_schema[:type] and ![:string, :blob].include?(col_schema[:type])
-      raise(Error, "nil/NULL is not allowed for the #{column} column") if value.nil? && (col_schema[:allow_null] == false)
-      model.db.typecast_value(col_schema[:type], value)
+      return value unless typecast_on_assignment && db_schema && (col_schema = db_schema[column]) && !model.serialized?(column)
+      value = nil if value == '' and typecast_empty_string_to_nil and col_schema[:type] and ![:string, :blob].include?(col_schema[:type])
+      raise(Error::InvalidValue, "nil/NULL is not allowed for the #{column} column") if raise_on_typecast_failure && value.nil? && (col_schema[:allow_null] == false)
+      begin
+        model.db.typecast_value(col_schema[:type], value)
+      rescue Error::InvalidValue
+        if raise_on_typecast_failure
+          raise
+        else
+          value
+        end
+      end
+    end
+
+    # Call uniq! on the given array. This is used by the :uniq option,
+    # and is an actual method for memory reasons.
+    def array_uniq!(a)
+      a.uniq!
     end
 
     # Set the columns, filtered by the only and except arrays.

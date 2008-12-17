@@ -5,19 +5,9 @@ module Sequel
     class Database < Sequel::Database
       set_adapter_scheme :informix
       
-      # AUTO_INCREMENT = 'IDENTITY(1,1)'.freeze
-      # 
-      # def auto_increment_sql
-      #   AUTO_INCREMENT
-      # end
-      
       def connect(server)
         opts = server_opts(server)
         ::Informix.connect(opts[:database], opts[:user], opts[:password])
-      end
-      
-      def disconnect
-        @pool.disconnect{|c| c.close}
       end
     
       def dataset(opts = nil)
@@ -36,9 +26,19 @@ module Sequel
         synchronize(opts[:server]){|c| yield c.cursor(sql)}
       end
       alias_method :query, :execute
+      
+      private
+
+      def disconnect_connection(c)
+        c.close
+      end
     end
     
     class Dataset < Sequel::Dataset
+      include UnsupportedIntersectExcept
+
+      SELECT_CLAUSE_ORDER = %w'limit distinct columns from join where having group union order'.freeze
+
       def literal(v)
         case v
         when Time
@@ -50,18 +50,6 @@ module Sequel
         end
       end
 
-      def select_sql(opts = nil)
-        limit = opts.delete(:limit)
-        offset = opts.delete(:offset)
-        sql = super
-        if limit
-          limit = "FIRST #{limit}"
-          offset = offset ? "SKIP #{offset}" : ""
-          sql.sub!(/^select /i,"SELECT #{offset} #{limit} ")
-        end
-        sql
-      end
-      
       def fetch_rows(sql, &block)
         execute(sql) do |cursor|
           begin
@@ -71,6 +59,17 @@ module Sequel
           end
         end
         self
+      end
+
+      private
+
+      def select_clause_order
+        SELECT_CLAUSE_ORDER
+      end
+
+      def select_limit_sql(sql, opts)
+        sql << " SKIP #{opts[:offset]}" if opts[:offset]
+        sql << " FIRST #{opts[:limit]}" if opts[:limit]
       end
     end
   end
