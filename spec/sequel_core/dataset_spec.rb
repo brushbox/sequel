@@ -39,6 +39,66 @@ context "Dataset" do
   specify "should include Enumerable" do
     Sequel::Dataset.included_modules.should include(Enumerable)
   end
+  
+  specify "should get quote_identifiers default from database" do
+    db = Sequel::Database.new(:quote_identifiers=>true)
+    db[:a].quote_identifiers?.should == true
+    db = Sequel::Database.new(:quote_identifiers=>false)
+    db[:a].quote_identifiers?.should == false
+  end
+
+  specify "should get identifier_input_method default from database" do
+    db = Sequel::Database.new(:identifier_input_method=>:upcase)
+    db[:a].identifier_input_method.should == :upcase
+    db = Sequel::Database.new(:identifier_input_method=>:downcase)
+    db[:a].identifier_input_method.should == :downcase
+  end
+
+  specify "should get identifier_output_method default from database" do
+    db = Sequel::Database.new(:identifier_output_method=>:upcase)
+    db[:a].identifier_output_method.should == :upcase
+    db = Sequel::Database.new(:identifier_output_method=>:downcase)
+    db[:a].identifier_output_method.should == :downcase
+  end
+end
+
+context "Dataset" do
+  setup do
+    @dataset = Sequel::Dataset.new("db")
+  end
+  
+  specify "should have quote_identifiers= method which changes literalization of identifiers" do
+    @dataset.quote_identifiers = true
+    @dataset.literal(:a).should == '"a"'
+    @dataset.quote_identifiers = false
+    @dataset.literal(:a).should == 'a'
+  end
+  
+  specify "should have upcase_identifiers= method which changes literalization of identifiers" do
+    @dataset.upcase_identifiers = true
+    @dataset.literal(:a).should == 'A'
+    @dataset.upcase_identifiers = false
+    @dataset.literal(:a).should == 'a'
+  end
+
+  specify "should have identifier_input_method= method which changes literalization of identifiers" do
+    @dataset.identifier_input_method = :upcase
+    @dataset.literal(:a).should == 'A'
+    @dataset.identifier_input_method = :downcase
+    @dataset.literal(:A).should == 'a'
+    @dataset.identifier_input_method = :reverse
+    @dataset.literal(:at_b).should == 'b_ta'
+  end
+  
+  specify "should have identifier_output_method= method which changes identifiers returned from the database" do
+    @dataset.send(:output_identifier, "at_b_C").should == :at_b_C
+    @dataset.identifier_output_method = :upcase
+    @dataset.send(:output_identifier, "at_b_C").should == :AT_B_C
+    @dataset.identifier_output_method = :downcase
+    @dataset.send(:output_identifier, "at_b_C").should == :at_b_c
+    @dataset.identifier_output_method = :reverse
+    @dataset.send(:output_identifier, "at_b_C").should == :C_b_ta
+  end
 end
 
 context "Dataset#clone" do
@@ -194,8 +254,8 @@ end
 context "Dataset#exists" do
   setup do
     @ds1 = Sequel::Dataset.new(nil).from(:test)
-    @ds2 = @ds1.filter(:price < 100)
-    @ds3 = @ds1.filter(:price > 50)
+    @ds2 = @ds1.filter(:price.sql_number < 100)
+    @ds3 = @ds1.filter(:price.sql_number > 50)
   end
   
   specify "should work in filters" do
@@ -290,7 +350,7 @@ context "Dataset#where" do
   end
       
   specify "should be composable using AND operator (for scoping) with block" do
-    @d3.where{:e < 5}.select_sql.should ==
+    @d3.where{:e.sql_number < 5}.select_sql.should ==
       "SELECT * FROM test WHERE ((a = 1) AND (e < 5))"
   end
   
@@ -318,7 +378,7 @@ context "Dataset#where" do
   end
 
   specify "should accept a subquery" do
-    @dataset.filter('gdp > ?', @d1.select(:avg[:gdp])).sql.should ==
+    @dataset.filter('gdp > ?', @d1.select(:avg.sql_function(:gdp))).sql.should ==
       "SELECT * FROM test WHERE (gdp > (SELECT avg(gdp) FROM test WHERE (region = 'Asia')))"
 
     @dataset.filter(:id => @d1.select(:id)).sql.should ==
@@ -326,20 +386,20 @@ context "Dataset#where" do
   end
   
   specify "should accept a subquery for an EXISTS clause" do
-    a = @dataset.filter(:price < 100)
+    a = @dataset.filter(:price.sql_number < 100)
     @dataset.filter(a.exists).sql.should ==
       'SELECT * FROM test WHERE (EXISTS (SELECT * FROM test WHERE (price < 100)))'
   end
   
   specify "should accept proc expressions" do
-    d = @d1.select(:avg[:gdp])
-    @dataset.filter {:gdp > d}.sql.should ==
+    d = @d1.select(:avg.sql_function(:gdp))
+    @dataset.filter {:gdp.sql_number > d}.sql.should ==
       "SELECT * FROM test WHERE (gdp > (SELECT avg(gdp) FROM test WHERE (region = 'Asia')))"
     
-    @dataset.filter {:a < 1}.sql.should ==
+    @dataset.filter {:a.sql_number < 1}.sql.should ==
       'SELECT * FROM test WHERE (a < 1)'
 
-    @dataset.filter {(:a >= 1) & (:b <= 2)}.sql.should ==
+    @dataset.filter {(:a.sql_number >= 1) & (:b.sql_number <= 2)}.sql.should ==
       'SELECT * FROM test WHERE ((a >= 1) AND (b <= 2))'
       
     @dataset.filter {:c.like 'ABC%'}.sql.should ==
@@ -365,7 +425,7 @@ context "Dataset#where" do
   end
 
   specify "should allow the use of blocks and arguments simultaneously" do
-    @dataset.filter(:zz < 3){:yy > 3}.sql.should ==
+    @dataset.filter(:zz.sql_number < 3){:yy.sql_number > 3}.sql.should ==
       'SELECT * FROM test WHERE ((zz < 3) AND (yy > 3))'
   end
 
@@ -405,12 +465,12 @@ context "Dataset#or" do
   specify "should accept all forms of filters" do
     @d1.or('y > ?', 2).sql.should ==
       'SELECT * FROM test WHERE ((x = 1) OR (y > 2))'
-    @d1.or(:yy > 3).sql.should ==
+    @d1.or(:yy.sql_number > 3).sql.should ==
       'SELECT * FROM test WHERE ((x = 1) OR (yy > 3))'
   end    
 
   specify "should accept blocks passed to filter" do
-    @d1.or{:yy > 3}.sql.should ==
+    @d1.or{:yy.sql_number > 3}.sql.should ==
       'SELECT * FROM test WHERE ((x = 1) OR (yy > 3))'
   end
   
@@ -423,7 +483,7 @@ context "Dataset#or" do
   end
 
   specify "should allow the use of blocks and arguments simultaneously" do
-    @d1.or(:zz < 3){:yy > 3}.sql.should ==
+    @d1.or(:zz.sql_number < 3){:yy.sql_number > 3}.sql.should ==
       'SELECT * FROM test WHERE ((x = 1) OR ((zz < 3) AND (yy > 3)))'
   end
 end
@@ -450,12 +510,12 @@ context "Dataset#and" do
     # probably not exhaustive, but good enough
     @d1.and('y > ?', 2).sql.should ==
       'SELECT * FROM test WHERE ((x = 1) AND (y > 2))'
-    @d1.and(:yy > 3).sql.should ==
+    @d1.and(:yy.sql_number > 3).sql.should ==
       'SELECT * FROM test WHERE ((x = 1) AND (yy > 3))'
   end
       
   specify "should accept blocks passed to filter" do
-    @d1.and {:yy > 3}.sql.should ==
+    @d1.and {:yy.sql_number > 3}.sql.should ==
       'SELECT * FROM test WHERE ((x = 1) AND (yy > 3))'
   end
   
@@ -500,12 +560,12 @@ context "Dataset#exclude" do
   end
   
   specify "should support proc expressions" do
-    @dataset.exclude{:id < 6}.sql.should == 
+    @dataset.exclude{:id.sql_number < 6}.sql.should == 
       'SELECT * FROM test WHERE (id >= 6)'
   end
   
   specify "should allow the use of blocks and arguments simultaneously" do
-    @dataset.exclude(:id => (7..11)){:id < 6}.sql.should == 
+    @dataset.exclude(:id => (7..11)){:id.sql_number < 6}.sql.should == 
       'SELECT * FROM test WHERE (((id < 7) OR (id > 11)) OR (id >= 6))'
   end
 end
@@ -531,7 +591,7 @@ end
 context "Dataset#having" do
   setup do
     @dataset = Sequel::Dataset.new(nil).from(:test)
-    @grouped = @dataset.group(:region).select(:region, :sum[:population], :avg[:gdp])
+    @grouped = @dataset.group(:region).select(:region, :sum.sql_function(:population), :avg.sql_function(:gdp))
     @d1 = @grouped.having('sum(population) > 10')
     @d2 = @grouped.having(:region => 'Asia')
     @columns = "region, sum(population), avg(gdp)"
@@ -547,12 +607,12 @@ context "Dataset#having" do
   end
 
   specify "should support proc expressions" do
-    @grouped.having {:sum[:population] > 10}.sql.should == 
+    @grouped.having {:sum.sql_function(:population) > 10}.sql.should == 
       "SELECT #{@columns} FROM test GROUP BY region HAVING (sum(population) > 10)"
   end
 
   specify "should work with and on the having clause" do
-    @grouped.having( :a > 1 ).and( :b < 2 ).sql.should ==
+    @grouped.having( :a.sql_number > 1 ).and( :b.sql_number < 2 ).sql.should ==
       "SELECT #{@columns} FROM test GROUP BY region HAVING ((a > 1) AND (b < 2))"
   end
 end
@@ -686,6 +746,9 @@ context "Dataset#literal" do
 
   specify "should literalize BigDecimal instances correctly" do
     @dataset.literal(BigDecimal.new("80")).should == "80.0"
+    @dataset.literal(BigDecimal.new("NaN")).should == "'NaN'"
+    @dataset.literal(BigDecimal.new("Infinity")).should == "'Infinity'"
+    @dataset.literal(BigDecimal.new("-Infinity")).should == "'-Infinity'"
   end
 
   specify "should raise an Error if the object can't be literalized" do
@@ -739,10 +802,10 @@ context "Dataset#from" do
   end
   
   specify "should accept sql functions" do
-    @dataset.from(:abc[:def]).select_sql.should ==
+    @dataset.from(:abc.sql_function(:def)).select_sql.should ==
       "SELECT * FROM abc(def)"
     
-    @dataset.from(:a[:i]).select_sql.should ==
+    @dataset.from(:a.sql_function(:i)).select_sql.should ==
       "SELECT * FROM a(i)"
   end
 
@@ -800,7 +863,7 @@ context "Dataset#select" do
   specify "should accept arbitrary objects and literalize them correctly" do
     @d.select(1, :a, 't').sql.should == "SELECT 1, a, 't' FROM test"
 
-    @d.select(nil, :sum[:t], :x___y).sql.should == "SELECT NULL, sum(t), x AS y FROM test"
+    @d.select(nil, :sum.sql_function(:t), :x___y).sql.should == "SELECT NULL, sum(t), x AS y FROM test"
 
     @d.select(nil, 1, :x => :y).sql.should == "SELECT NULL, 1, x AS y FROM test"
   end
@@ -1158,7 +1221,7 @@ context "Dataset#count" do
   end
   
   specify "should include the where clause if it's there" do
-    @dataset.filter(:abc < 30).count.should == 1
+    @dataset.filter(:abc.sql_number < 30).count.should == 1
     @c.sql.should == 'SELECT COUNT(*) FROM test WHERE (abc < 30) LIMIT 1'
   end
   
@@ -1265,7 +1328,7 @@ context "Dataset#join_table" do
   end
   
   specify "should include WHERE clause if applicable" do
-    @d.filter(:price < 100).join_table(:right_outer, :categories, :category_id => :id).sql.should ==
+    @d.filter(:price.sql_number < 100).join_table(:right_outer, :categories, :category_id => :id).sql.should ==
       'SELECT * FROM "items" RIGHT OUTER JOIN "categories" ON ("categories"."category_id" = "items"."id") WHERE ("price" < 100)'
   end
   
@@ -1425,7 +1488,7 @@ context "Dataset#join_table" do
   end
 
   specify "should support using an expression as the join condition" do
-    @d.join(:categories, :number > 10).sql.should ==
+    @d.join(:categories, :number.sql_number > 10).sql.should ==
       'SELECT * FROM "items" INNER JOIN "categories" ON ("number" > 10)'
   end
 
@@ -1631,7 +1694,7 @@ context "Dataset#range" do
     @d.range(:stamp)
     @d.last_sql.should == "SELECT min(stamp) AS v1, max(stamp) AS v2 FROM test LIMIT 1"
 
-    @d.filter(:price > 100).range(:stamp)
+    @d.filter(:price.sql_number > 100).range(:stamp)
     @d.last_sql.should == "SELECT min(stamp) AS v1, max(stamp) AS v2 FROM test WHERE (price > 100) LIMIT 1"
   end
   
@@ -1659,7 +1722,7 @@ context "Dataset#interval" do
     @d.interval(:stamp)
     @d.last_sql.should == "SELECT (max(stamp) - min(stamp)) FROM test LIMIT 1"
 
-    @d.filter(:price > 100).interval(:stamp)
+    @d.filter(:price.sql_number > 100).interval(:stamp)
     @d.last_sql.should == "SELECT (max(stamp) - min(stamp)) FROM test WHERE (price > 100) LIMIT 1"
   end
   
@@ -1700,20 +1763,20 @@ context "Dataset #first and #last" do
   end
   
   specify "should return the first matching record if a block is given without an argument" do
-    @d.first{:z > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE (z > 26) LIMIT 1']
-    @d.order(:name).last{:z > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE (z > 26) ORDER BY name DESC LIMIT 1']
+    @d.first{:z.sql_number > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE (z > 26) LIMIT 1']
+    @d.order(:name).last{:z.sql_number > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE (z > 26) ORDER BY name DESC LIMIT 1']
   end
   
   specify "should combine block and standard argument filters if argument is not an Integer" do
-    @d.first(:y=>25){:z > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE ((z > 26) AND (y = 25)) LIMIT 1']
-    @d.order(:name).last('y = ?', 16){:z > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE ((z > 26) AND (y = 16)) ORDER BY name DESC LIMIT 1']
+    @d.first(:y=>25){:z.sql_number > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE ((z > 26) AND (y = 25)) LIMIT 1']
+    @d.order(:name).last('y = ?', 16){:z.sql_number > 26}.should == [:a,1,:b,2, 'SELECT * FROM test WHERE ((z > 26) AND (y = 16)) ORDER BY name DESC LIMIT 1']
   end
   
   specify "should filter and return an array of records if an Integer argument is provided and a block is given" do
     i = rand(10) + 10
-    r = @d.order(:a).first(i){:z > 26}.should == [[:a,1,:b,2, "SELECT * FROM test WHERE (z > 26) ORDER BY a LIMIT #{i}"]] * i
+    r = @d.order(:a).first(i){:z.sql_number > 26}.should == [[:a,1,:b,2, "SELECT * FROM test WHERE (z > 26) ORDER BY a LIMIT #{i}"]] * i
     i = rand(10) + 10
-    r = @d.order(:a).last(i){:z > 26}.should == [[:a,1,:b,2, "SELECT * FROM test WHERE (z > 26) ORDER BY a DESC LIMIT #{i}"]] * i
+    r = @d.order(:a).last(i){:z.sql_number > 26}.should == [[:a,1,:b,2, "SELECT * FROM test WHERE (z > 26) ORDER BY a DESC LIMIT #{i}"]] * i
   end
   
   specify "#last should raise if no order is given" do
@@ -1731,7 +1794,7 @@ context "Dataset #first and #last" do
   end
 end
 
-context "Dataset set operations" do
+context "Dataset compound operations" do
   setup do
     @a = Sequel::Dataset.new(nil).from(:a).filter(:z => 1)
     @b = Sequel::Dataset.new(nil).from(:b).filter(:z => 2)
@@ -1756,6 +1819,28 @@ context "Dataset set operations" do
       "SELECT * FROM a WHERE (z = 1) EXCEPT SELECT * FROM b WHERE (z = 2)"
     @b.except(@a, true).sql.should == \
       "SELECT * FROM b WHERE (z = 2) EXCEPT ALL SELECT * FROM a WHERE (z = 1)"
+  end
+    
+  specify "should handle chained compound operations" do
+    @a.union(@b).union(@a, true).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) UNION SELECT * FROM b WHERE (z = 2) UNION ALL SELECT * FROM a WHERE (z = 1)"
+    @a.intersect(@b, true).intersect(@a).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) INTERSECT ALL SELECT * FROM b WHERE (z = 2) INTERSECT SELECT * FROM a WHERE (z = 1)"
+    @a.except(@b).except(@a, true).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) EXCEPT SELECT * FROM b WHERE (z = 2) EXCEPT ALL SELECT * FROM a WHERE (z = 1)"
+    @a.union(@b, true).intersect(@a).except(@b, true).union(@a).intersect(@b, true).except(@a).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) UNION ALL SELECT * FROM b WHERE (z = 2) INTERSECT SELECT * FROM a WHERE (z = 1) EXCEPT ALL SELECT * FROM b WHERE (z = 2) UNION SELECT * FROM a WHERE (z = 1) INTERSECT ALL SELECT * FROM b WHERE (z = 2) EXCEPT SELECT * FROM a WHERE (z = 1)"
+  end
+  
+  specify "should use a subselect when using a compound operation with a dataset that already has a compound operation" do
+    @a.union(@b.union(@a, true)).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) UNION SELECT * FROM (SELECT * FROM b WHERE (z = 2) UNION ALL SELECT * FROM a WHERE (z = 1))"
+    @a.intersect(@b.intersect(@a), true).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) INTERSECT ALL SELECT * FROM (SELECT * FROM b WHERE (z = 2) INTERSECT SELECT * FROM a WHERE (z = 1))"
+    @a.except(@b.except(@a, true)).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) EXCEPT SELECT * FROM (SELECT * FROM b WHERE (z = 2) EXCEPT ALL SELECT * FROM a WHERE (z = 1))"
+    @a.union(@b.intersect(@a.except(@b, true)), true).union(@a.intersect(@b.except(@a), true)).sql.should == \
+      "SELECT * FROM a WHERE (z = 1) UNION ALL SELECT * FROM (SELECT * FROM b WHERE (z = 2) INTERSECT SELECT * FROM (SELECT * FROM a WHERE (z = 1) EXCEPT ALL SELECT * FROM b WHERE (z = 2))) UNION SELECT * FROM (SELECT * FROM a WHERE (z = 1) INTERSECT ALL SELECT * FROM (SELECT * FROM b WHERE (z = 2) EXCEPT SELECT * FROM a WHERE (z = 1)))"
   end
 end
 
@@ -2512,7 +2597,7 @@ context "Dataset#query" do
     q.sql.should == "SELECT * FROM zzz WHERE ((x + 2) > (y + 3))"
 
     q = @d.from(:zzz).query do
-      where((:x > 1) & (:y > 2))
+      where((:x.sql_number > 1) & (:y.sql_number > 2))
     end
     q.class.should == @d.class
     q.sql.should == "SELECT * FROM zzz WHERE ((x > 1) AND (y > 2))"
@@ -2528,7 +2613,7 @@ context "Dataset#query" do
     q = @d.query do
       from :abc
       group_by :id
-      having(:x >= 2)
+      having(:x.sql_number >= 2)
     end
     q.class.should == @d.class
     q.sql.should == "SELECT * FROM abc GROUP BY id HAVING (x >= 2)"
@@ -2581,7 +2666,7 @@ context "Dataset" do
   end
 
   specify "should support self-changing filter! with block" do
-    @d.filter!{:y < 2}
+    @d.filter!{:y.sql_number < 2}
     @d.sql.should == "SELECT * FROM x WHERE (y < 2)"
   end
   

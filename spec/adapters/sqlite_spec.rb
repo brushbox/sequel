@@ -248,6 +248,20 @@ context "An SQLite dataset" do
   end
 end
 
+context "An SQLite numeric column" do
+  specify "should handle and return BigDecimal values" do
+    SQLITE_DB.create_table!(:d){numeric :d}
+    d = SQLITE_DB[:d]
+    d.insert(:d=>BigDecimal.new('80.0'))
+    d.insert(:d=>BigDecimal.new('NaN'))
+    d.insert(:d=>BigDecimal.new('Infinity'))
+    d.insert(:d=>BigDecimal.new('-Infinity'))
+    ds = d.all
+    ds.shift.should == {:d=>BigDecimal.new('80.0')}
+    ds.map{|x| x[:d].to_s}.should == %w'NaN Infinity -Infinity'
+  end
+end
+
 context "An SQLite dataset AS clause" do
   specify "should use a string literal for :col___alias" do
     SQLITE_DB.literal(:c___a).should == "c AS 'a'"
@@ -321,10 +335,10 @@ context "SQLite::Dataset#delete" do
   
   specify "should return the number of records affected when filtered" do
     @d.count.should == 3
-    @d.filter {:value < 3}.delete.should == 1
+    @d.filter {:value.sql_number < 3}.delete.should == 1
     @d.count.should == 2
 
-    @d.filter {:value < 3}.delete.should == 0
+    @d.filter {:value.sql_number < 3}.delete.should == 0
     @d.count.should == 2
   end
   

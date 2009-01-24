@@ -85,9 +85,14 @@ module Sequel
       
       private
       
-      # SQLite folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers by default.
-      def upcase_identifiers_default
-        false
+      # SQLite folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on input.
+      def identifier_input_method_default
+        nil
+      end
+      
+      # SQLite folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on output.
+      def identifier_output_method_default
+        nil
       end
 
       # SQLite supports schema parsing using the table_info PRAGMA, so
@@ -132,20 +137,12 @@ module Sequel
       end
       
       # SQLite performs a TRUNCATE style DELETE if no filter is specified.
-      # Since we want to always return the count of records, do a specific
-      # count in the case of no filter.
+      # Since we want to always return the count of records, add a condition
+      # that is always true and then delete.
       def delete(opts = {})
         # check if no filter is specified
         opts = @opts.merge(opts)
-        unless opts[:where]
-          @db.transaction(opts[:server]) do
-            unfiltered_count = count
-            execute_dui(delete_sql(opts))
-            unfiltered_count
-          end
-        else
-          execute_dui(delete_sql(opts))
-        end
+        super(opts[:where] ? opts : opts.merge(:where=>{1=>1}))
       end
       
       # Insert the values into the database.

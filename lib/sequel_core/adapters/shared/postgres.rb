@@ -1,10 +1,45 @@
 module Sequel
+  # Top level module for holding all PostgreSQL-related modules and classes
+  # for Sequel.  There are a few module level accessors that are added via
+  # metaprogramming.  These are:
+  # * client_min_messages (only available when using the native adapter) -
+  #   Change the minimum level of messages that PostgreSQL will send to the
+  #   the client.  The PostgreSQL default is NOTICE, the Sequel default is
+  #   WARNING.  Set to nil to not change the server default.
+  # * force_standard_strings - Set to false to not force the use of
+  #   standard strings
+  # * use_iso_date_format (only available when using the native adapter) -
+  #   Set to false to not change the date format to
+  #   ISO.  This disables one of Sequel's optimizations.
+  #
+  # Changes in these settings only affect future connections.  To make
+  # sure that they are applied, they should generally be called right
+  # after the Database object is instantiated and before a connection
+  # is actually made. For example, to use whatever the server defaults are:
+  #
+  #   DB = Sequel.postgres(...)
+  #   Sequel::Postgres.client_min_messages = nil
+  #   Sequel::Postgres.force_standard_strings = false
+  #   Sequel::Postgres.use_iso_date_format = false
+  #   # A connection to the server is not made until here
+  #   DB[:t].all
+  #
+  # The reason they can't be done earlier is that the Sequel::Postgres
+  # module is not loaded until a Database object which uses PostgreSQL
+  # is created.
   module Postgres
     # Array of exceptions that need to be converted.  JDBC
     # uses NativeExceptions, the native adapter uses PGError.
     CONVERTED_EXCEPTIONS = []
     
+    @client_min_messages = :warning
     @force_standard_strings = true
+    
+    # By default, Sequel sets the minimum level of log messages sent to the client
+    # to WARNING, where PostgreSQL uses a default of NOTICE.  This is to avoid a lot
+    # of mostly useless messages when running migrations, such as a couple of lines
+    # for every serial primary key field.
+    metaattr_accessor :client_min_messages
 
     # By default, Sequel forces the use of standard strings, so that
     # '\\' is interpreted as \\ and not \.  While PostgreSQL defaults
@@ -77,6 +112,11 @@ module Sequel
           # and we don't know the server version at this point, so
           # try it unconditionally and rescue any errors.
           execute(sql) rescue nil
+        end
+        if cmm = Postgres.client_min_messages
+          sql = "SET client_min_messages = '#{cmm.to_s.upcase}'"
+          @db.log_info(sql)
+          execute(sql)
         end
       end
 
@@ -283,13 +323,13 @@ module Sequel
         filter = " WHERE #{filter_expr(filter)}" if filter
         case index_type
         when :full_text
-          cols = Array(index[:columns]).map{|x| :COALESCE[x, '']}.sql_string_join(' ')
+          cols = Array(index[:columns]).map{|x| SQL::Function.new(:COALESCE, x, '')}.sql_string_join(' ')
           expr = "(to_tsvector(#{literal(index[:language] || 'simple')}, #{literal(cols)}))"
           index_type = :gin
         when :spatial
           index_type = :gist
         end
-        "CREATE #{unique}INDEX #{index_name} ON #{table_name} #{"USING #{index_type} " if index_type}#{expr}#{filter}"
+        "CREATE #{unique}INDEX #{quote_identifier(index_name)} ON #{quote_schema_table(table_name)} #{"USING #{index_type} " if index_type}#{expr}#{filter}"
       end
       
       # Dataset containing all current database locks 
@@ -323,7 +363,7 @@ module Sequel
           (conn.server_version rescue nil) if conn.respond_to?(:server_version)
         end
         unless @server_version
-          m = /PostgreSQL (\d+)\.(\d+)\.(\d+)/.match(get(:version[]))
+          m = /PostgreSQL (\d+)\.(\d+)\.(\d+)/.match(get(SQL::Function.new(:version)))
           @server_version = (m[1].to_i * 10000) + (m[2].to_i * 100) + m[3].to_i
         end
         @server_version
@@ -397,9 +437,14 @@ module Sequel
 
       private
       
-      # PostgreSQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers by default.
-      def upcase_identifiers_default
-        false
+      # PostgreSQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on input.
+      def identifier_input_method_default
+        nil
+      end
+      
+      # PostgreSQL folds unquoted identifiers to lowercase, so it shouldn't need to upcase identifiers on output.
+      def identifier_output_method_default
+        nil
       end
 
       # The result of the insert for the given table and values.  If values
@@ -490,7 +535,7 @@ module Sequel
           left_outer_join(:pg_attrdef, :adrelid=>:pg_class__oid, :adnum=>:pg_attribute__attnum).
           left_outer_join(:pg_index, :indrelid=>:pg_class__oid, :indisprimary=>true).
           filter(:pg_attribute__attisdropped=>false).
-          filter(:pg_attribute__attnum > 0).
+          filter(:pg_attribute__attnum.sql_number > 0).
           order(:pg_attribute__attnum)
         if table_name
           ds.filter!(:pg_class__relname=>table_name.to_s)
@@ -524,7 +569,7 @@ module Sequel
       QUERY_PLAN = 'QUERY PLAN'.to_sym
       ROW_EXCLUSIVE = 'ROW EXCLUSIVE'.freeze
       ROW_SHARE = 'ROW SHARE'.freeze
-      SELECT_CLAUSE_ORDER = %w'distinct columns from join where group having intersect union except order limit lock'.freeze
+      SELECT_CLAUSE_ORDER = %w'distinct columns from join where group having compounds order limit lock'.freeze
       SHARE = 'SHARE'.freeze
       SHARE_ROW_EXCLUSIVE = 'SHARE ROW EXCLUSIVE'.freeze
       SHARE_UPDATE_EXCLUSIVE = 'SHARE UPDATE EXCLUSIVE'.freeze
@@ -575,7 +620,7 @@ module Sequel
       # in 8.3 by default, and available for earlier versions as an add-on).
       def full_text_search(cols, terms, opts = {})
         lang = opts[:language] || 'simple'
-        cols =  Array(cols).map{|x| :COALESCE[x, '']}.sql_string_join(' ')
+        cols =  Array(cols).map{|x| SQL::Function.new(:COALESCE, x, '')}.sql_string_join(' ')
         filter("to_tsvector(#{literal(lang)}, #{literal(cols)}) @@ to_tsquery(#{literal(lang)}, #{literal(Array(terms).join(' | '))})")
       end
       
@@ -606,9 +651,9 @@ module Sequel
         when LiteralString
           v
         when SQL::Blob
-          db.synchronize{|c| "E'#{c.escape_bytea(v)}'"}
+          "'#{v.gsub(/[\000-\037\047\134\177-\377]/){|b| "\\#{("%o" % b[0..1].unpack("C")[0]).rjust(3, '0')}"}}'"
         when String
-          db.synchronize{|c| "'#{c.escape_string(v)}'"}
+          "'#{v.gsub("'", "''")}'"
         when Time
           "#{v.strftime(PG_TIMESTAMP_FORMAT)}.#{sprintf("%06d",v.usec)}'"
         when DateTime
@@ -655,6 +700,15 @@ module Sequel
       def insert_returning_pk_sql(*values)
         pk = db.primary_key(opts[:from].first)
         insert_returning_sql(pk ? Sequel::SQL::Identifier.new(pk) : 'NULL'.lit, *values)
+      end
+      
+      # PostgreSQL is smart and can use parantheses around all datasets to get
+      # the correct answers.
+      def select_compounds_sql(sql, opts)
+        return unless opts[:compounds]
+        opts[:compounds].each do |type, dataset, all|
+          sql.replace("(#{sql} #{type.to_s.upcase}#{' ALL' if all} #{subselect_sql(dataset)})")
+        end
       end
 
       # The order of clauses in the SELECT SQL statement

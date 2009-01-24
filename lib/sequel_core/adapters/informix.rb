@@ -37,7 +37,7 @@ module Sequel
     class Dataset < Sequel::Dataset
       include UnsupportedIntersectExcept
 
-      SELECT_CLAUSE_ORDER = %w'limit distinct columns from join where having group union order'.freeze
+      SELECT_CLAUSE_ORDER = %w'limit distinct columns from join where having group compounds order'.freeze
 
       def literal(v)
         case v
@@ -53,7 +53,16 @@ module Sequel
       def fetch_rows(sql, &block)
         execute(sql) do |cursor|
           begin
-            cursor.open.each_hash(&block)
+            col_map = nil
+            cursor.open.each_hash do |h|
+              unless col_map
+                col_map = {}
+                @columns = h.keys.map{|k| col_map[k] = output_identifier(k)}
+              end
+              h2 = {}
+              h.each{|k,v| h2[col_map[k]||k] = v}
+              yield h2
+            end
           ensure
             cursor.drop
           end

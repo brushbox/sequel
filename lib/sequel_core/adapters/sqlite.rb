@@ -31,6 +31,7 @@ module Sequel
         db = ::SQLite3::Database.new(opts[:database])
         db.busy_timeout(opts.fetch(:timeout, 5000))
         db.type_translation = true
+        
         # Handle datetime's with Sequel.datetime_class
         prok = proc do |t,v|
           v = Time.at(v.to_i).iso8601 if UNIX_EPOCH_TIME_FORMAT.match(v)
@@ -38,6 +39,13 @@ module Sequel
         end
         db.translator.add_translator("timestamp", &prok)
         db.translator.add_translator("datetime", &prok)
+        
+        # Handle numeric values with BigDecimal
+        prok = proc{|t,v| BigDecimal.new(v) rescue v}
+        db.translator.add_translator("numeric", &prok)
+        db.translator.add_translator("decimal", &prok)
+        db.translator.add_translator("money", &prok)
+        
         db
       end
       
@@ -74,10 +82,14 @@ module Sequel
           return yield(conn) if conn.transaction_active?
           begin
             result = nil
+            log_info('Transaction.begin')
             conn.transaction{result = yield(conn)}
             result
           rescue ::Exception => e
+            log_info('Transaction.rollback')
             transaction_error(e, SQLite3::Exception)
+          ensure
+            log_info('Transaction.commit') unless e
           end
         end
       end
@@ -183,7 +195,7 @@ module Sequel
       # Yield a hash for each row in the dataset.
       def fetch_rows(sql)
         execute(sql) do |result|
-          @columns = result.columns.map {|c| c.to_sym}
+          @columns = result.columns.map{|c| output_identifier(c)}
           column_count = @columns.size
           result.each do |values|
             row = {}

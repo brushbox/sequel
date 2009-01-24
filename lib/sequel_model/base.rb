@@ -208,6 +208,7 @@ module Sequel
         subclass.instance_variable_set(iv, sup_class_value)
       end
       unless ivs.include?("@dataset")
+        db
         begin
           if sup_class == Model
             subclass.set_dataset(Model.db[subclass.implicit_table_name]) unless subclass.name.blank?
@@ -401,8 +402,8 @@ module Sequel
     # create dataset methods, so they can be chained for scoping.
     # For example:
     #
-    #   Topic.subset(:popular, :num_posts > 100)
-    #   Topic.subset(:recent, :created_on > Date.today - 7)
+    #   Topic.subset(:popular, :num_posts.sql_number > 100)
+    #   Topic.subset(:recent, :created_on + 7 > Date.today)
     #
     # Allows you to do:
     #
@@ -491,7 +492,7 @@ module Sequel
 
     # Module that the class includes that holds methods the class adds for column accessors and
     # associations so that the methods can be overridden with super
-    def self.overridable_methods_module
+    def self.overridable_methods_module # :nodoc:
       include(@overridable_methods_module = Module.new) unless @overridable_methods_module
       @overridable_methods_module
     end

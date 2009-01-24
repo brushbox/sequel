@@ -15,7 +15,7 @@ rescue LoadError => e
           # If there is no escape_string instead method, but there is an
           # escape class method, use that instead.
           def escape_string(str)
-            self.class.escape(str)
+            Sequel::Postgres.force_standard_strings ? str.gsub("'", "''") : self.class.escape(str)
           end
         else
           # Raise an error if no valid string escaping method can be found.
@@ -79,8 +79,6 @@ rescue LoadError => e
 end
 
 module Sequel
-  # Top level module for holding all PostgreSQL-related modules and classes
-  # for Sequel.
   module Postgres
     CONVERTED_EXCEPTIONS << PGError
     
@@ -314,7 +312,7 @@ module Sequel
         cols = []
         execute(sql) do |res|
           res.nfields.times do |fieldnum|
-            cols << [fieldnum, PG_TYPES[res.ftype(fieldnum)], res.fname(fieldnum).to_sym]
+            cols << [fieldnum, PG_TYPES[res.ftype(fieldnum)], output_identifier(res.fname(fieldnum))]
           end
           @columns = cols.map{|c| c.at(2)}
           res.ntuples.times do |recnum|
@@ -325,6 +323,20 @@ module Sequel
             end
             yield converted_rec
           end
+        end
+      end
+
+      # Literalize strings and blobs using code from the native adapter.
+      def literal(v)
+        case v
+        when LiteralString
+          v
+        when SQL::Blob
+          db.synchronize{|c| "'#{c.escape_bytea(v)}'"}
+        when String
+          db.synchronize{|c| "'#{c.escape_string(v)}'"}
+        else
+          super
         end
       end
       
